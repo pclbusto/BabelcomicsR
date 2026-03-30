@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE setups SET carpeta_thumbnails = ? WHERE setupkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "584981a108e5ad0f95e72377a3fae45d8e8ac17c0e9ce4f15bbc640adb7ac89d"
+}

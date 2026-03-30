@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                id_publisher as \"id_publisher!: i64\",\n                nombre as \"nombre!: String\",\n                descripcion,\n                id_comicvine,\n                image_url\n               FROM publishers WHERE nombre LIKE ? ORDER BY nombre COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "id_publisher!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "nombre!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "descripcion",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "id_comicvine",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "image_url",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6895d3a9eec278cc4bd753f9366a5965ebf13793f6e4fa820524005bc03f5d3e"
+}

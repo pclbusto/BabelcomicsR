@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM publishers WHERE id_publisher = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "406ebab9b802e50ea4e1d3566885faf5066268a5d4e2da8fbf09464be714e7c6"
+}

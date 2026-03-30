@@ -1,0 +1,11 @@
+pub mod paths;
+pub mod scanner;
+pub mod extractor;
+pub mod thumbnail;
+pub mod scan_service;
+pub mod extraction_registry;
+pub mod organizer;
+pub mod comicvine_client;
+pub mod cover_hash;
+pub mod suggestion_service;
+pub mod download_manager;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO comicbooks_info\n                (titulo, id_volume, numero, resumen, calificacion, id_comicvine, url_api_detalle)\n             VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "79969128852186d3b3c8eb8e42d0e982a15170b612d40c49816466db775f4b8f"
+}

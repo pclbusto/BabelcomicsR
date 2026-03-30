@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO publishers (nombre, descripcion, id_comicvine, image_url)\n             VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "43138b3ce40914dfe94eb26db36a726b45e4a9289fa530447f5202da9064c523"
+}

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                id as \"id!: i64\",\n                path as \"path!: String\",\n                setup_key as \"setup_key!: String\"\n               FROM setup_directorios WHERE setup_key = ? ORDER BY path",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "path!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "setup_key!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "576b449cc31b9d811f33ad12c1032a0b1e49a89aa44fb94a181fabaa06cd84bd"
+}

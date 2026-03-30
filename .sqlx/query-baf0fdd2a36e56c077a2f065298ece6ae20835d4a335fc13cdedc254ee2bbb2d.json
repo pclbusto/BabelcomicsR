@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE comicbooks_info\n             SET titulo = ?, id_volume = ?, numero = ?, resumen = ?,\n                 calificacion = ?, id_comicvine = ?, url_api_detalle = ?, fue_actualizado_api = ?\n             WHERE id_comicbook_info = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "baf0fdd2a36e56c077a2f065298ece6ae20835d4a335fc13cdedc254ee2bbb2d"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM comicbooks_info WHERE id_comicbook_info = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3507120d6e14207639d75c851cfb0180a356a10ac68f1560a5fe6bc62335eada"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM setup_directorios WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d00ad3c46fafce6c738aa6b1e1f749d5135f8be37ff8c5d1d37eedde238afb2b"
+}

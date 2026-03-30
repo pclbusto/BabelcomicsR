@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE setups SET thumbnail_size = ? WHERE setupkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f24747c13aa323d9613538c0eb8a3dd906e45bb21c05a16a99d071b49392e035"
+}

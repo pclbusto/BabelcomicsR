@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE publishers SET nombre = ?, descripcion = ?, id_comicvine = ?, image_url = ?\n             WHERE id_publisher = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "94fed6ff15653ecf627a6865619697114573c08298a2ebe1b3abab9288508c72"
+}

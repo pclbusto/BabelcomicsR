@@ -1,0 +1,386 @@
+use anyhow::Result;
+use sqlx::{SqlitePool, Row};
+
+use crate::models::{Comicbook, ComicFilter, ComicbookView, NewComicbook};
+
+pub struct ComicbookRepository<'a> {
+    pool: &'a SqlitePool,
+}
+
+impl<'a> ComicbookRepository<'a> {
+    pub fn new(pool: &'a SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn get_by_id(&self, id: i64) -> Result<Option<Comicbook>> {
+        let row = sqlx::query_as::<_, Comicbook>(
+            r#"SELECT
+                id_comicbook,
+                path,
+                id_comicbook_info,
+                calidad,
+                en_papelera,
+                embedding,
+                error_ultimo_escaneo,
+                procesado
+               FROM comicbooks WHERE id_comicbook = ?"#
+        )
+        .bind(id)
+        .fetch_optional(self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_by_path(&self, path: &str) -> Result<Option<Comicbook>> {
+        let row = sqlx::query_as::<_, Comicbook>(
+            r#"SELECT
+                id_comicbook,
+                path,
+                id_comicbook_info,
+                calidad,
+                en_papelera,
+                embedding,
+                error_ultimo_escaneo,
+                procesado
+               FROM comicbooks WHERE path = ?"#
+        )
+        .bind(path)
+        .fetch_optional(self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Página de datos enriquecidos para lazy loading con soporte para filtros
+    pub async fn get_page(
+        &self,
+        limit: i64,
+        offset: i64,
+        incluir_papelera: bool,
+        filter: Option<&ComicFilter>,
+    ) -> Result<Vec<ComicbookView>> {
+        let q = filter.and_then(|f| f.query.as_deref()).map(|s| format!("%{}%", s));
+        let clasificado = filter.and_then(|f| f.clasificado);
+        let min_q = filter.and_then(|f| f.min_calidad).map(|v| v as i64);
+
+        let rows = sqlx::query(
+            r#"SELECT
+                cb.id_comicbook,
+                cb.path,
+                cb.en_papelera,
+                cb.calidad,
+                cb.error_ultimo_escaneo,
+                cb.procesado,
+                ci.titulo,
+                ci.numero,
+                ci.calificacion,
+                v.nombre  AS nombre_volume,
+                p.nombre  AS nombre_publisher,
+                (SELECT cic.ruta_local
+                 FROM comicbooks_info_covers cic
+                 WHERE cic.id_comicbook_info = ci.id_comicbook_info
+                 LIMIT 1) AS ruta_cover
+               FROM comicbooks cb
+               LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
+               LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
+               LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
+               WHERE (? = 1 OR cb.en_papelera = 0)
+                 AND (? IS NULL OR (COALESCE(ci.titulo, '') LIKE ? OR cb.path LIKE ? OR COALESCE(v.nombre, '') LIKE ?))
+                 AND (? IS NULL OR (ci.id_comicbook_info IS NOT NULL) = ?)
+                 AND (? IS NULL OR CAST(cb.calidad AS INTEGER) >= ?)
+               ORDER BY COALESCE(ci.titulo, cb.path) COLLATE NOCASE
+               LIMIT ? OFFSET ?"#
+        )
+        .bind(incluir_papelera)
+        .bind(&q).bind(&q).bind(&q).bind(&q)
+        .bind(clasificado).bind(clasificado)
+        .bind(min_q).bind(min_q)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ComicbookView {
+                id_comicbook: r.get(0),
+                path: r.get(1),
+                en_papelera: r.get(2),
+                calidad: r.get(3),
+                error_ultimo_escaneo: r.get(4),
+                procesado: r.get(5),
+                titulo: r.get(6),
+                numero: r.get(7),
+                calificacion: r.get(8),
+                nombre_volume: r.get(9),
+                nombre_publisher: r.get(10),
+                ruta_cover: r.get(11),
+            })
+            .collect())
+    }
+
+    /// Vista enriquecida de un único comic por ID
+    pub async fn get_view_by_id(&self, id: i64) -> Result<Option<ComicbookView>> {
+        let row = sqlx::query(
+            r#"SELECT
+                cb.id_comicbook,
+                cb.path,
+                cb.en_papelera,
+                cb.calidad,
+                cb.error_ultimo_escaneo,
+                cb.procesado,
+                ci.titulo,
+                ci.numero,
+                ci.calificacion,
+                v.nombre  AS nombre_volume,
+                p.nombre  AS nombre_publisher,
+                (SELECT cic.ruta_local
+                 FROM comicbooks_info_covers cic
+                 WHERE cic.id_comicbook_info = ci.id_comicbook_info
+                 LIMIT 1) AS ruta_cover
+               FROM comicbooks cb
+               LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
+               LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
+               LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
+               WHERE cb.id_comicbook = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(self.pool)
+        .await?;
+
+        Ok(row.map(|r| ComicbookView {
+            id_comicbook: r.get(0),
+            path: r.get(1),
+            en_papelera: r.get(2),
+            calidad: r.get(3),
+            error_ultimo_escaneo: r.get(4),
+            procesado: r.get(5),
+            titulo: r.get(6),
+            numero: r.get(7),
+            calificacion: r.get(8),
+            nombre_volume: r.get(9),
+            nombre_publisher: r.get(10),
+            ruta_cover: r.get(11),
+        }))
+    }
+
+    /// Lista con datos enriquecidos para mostrar en la UI
+    pub async fn get_all_view(&self, incluir_papelera: bool) -> Result<Vec<ComicbookView>> {
+        let rows = sqlx::query(
+            r#"SELECT
+                cb.id_comicbook,
+                cb.path,
+                cb.en_papelera,
+                cb.calidad,
+                cb.error_ultimo_escaneo,
+                cb.procesado,
+                ci.titulo,
+                ci.numero,
+                ci.calificacion,
+                v.nombre  AS nombre_volume,
+                p.nombre  AS nombre_publisher,
+                (SELECT cic.ruta_local
+                 FROM comicbooks_info_covers cic
+                 WHERE cic.id_comicbook_info = ci.id_comicbook_info
+                 LIMIT 1) AS ruta_cover
+               FROM comicbooks cb
+               LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
+               LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
+               LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
+               WHERE (? = 1 OR cb.en_papelera = 0)
+               ORDER BY COALESCE(ci.titulo, cb.path) COLLATE NOCASE"#
+        )
+        .bind(incluir_papelera)
+        .fetch_all(self.pool)
+        .await?;
+
+        let views = rows
+            .into_iter()
+            .map(|r| ComicbookView {
+                id_comicbook: r.get(0),
+                path: r.get(1),
+                en_papelera: r.get(2),
+                calidad: r.get(3),
+                error_ultimo_escaneo: r.get(4),
+                procesado: r.get(5),
+                titulo: r.get(6),
+                numero: r.get(7),
+                calificacion: r.get(8),
+                nombre_volume: r.get(9),
+                nombre_publisher: r.get(10),
+                ruta_cover: r.get(11),
+            })
+            .collect();
+        Ok(views)
+    }
+
+    pub async fn get_uncatalogued(&self) -> Result<Vec<Comicbook>> {
+        let rows = sqlx::query_as::<_, Comicbook>(
+            r#"SELECT
+                id_comicbook,
+                path,
+                id_comicbook_info,
+                calidad,
+                en_papelera,
+                embedding,
+                error_ultimo_escaneo,
+                procesado
+               FROM comicbooks
+               WHERE id_comicbook_info IS NULL AND en_papelera = 0
+               ORDER BY path"#
+        )
+        .fetch_all(self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn insert(&self, new: &NewComicbook) -> Result<i64> {
+        let id = sqlx::query(
+            "INSERT OR IGNORE INTO comicbooks (path, id_comicbook_info, calidad)
+             VALUES (?, ?, ?)"
+        )
+        .bind(&new.path)
+        .bind(new.id_comicbook_info)
+        .bind(&new.calidad)
+        .execute(self.pool)
+        .await?
+        .last_insert_rowid();
+        Ok(id)
+    }
+
+    /// Inserta múltiples comicbooks en una transacción (para escaneo masivo)
+    pub async fn insert_batch(&self, paths: &[String]) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let mut inserted = 0u64;
+
+        for path in paths {
+            let result = sqlx::query(
+                "INSERT OR IGNORE INTO comicbooks (path) VALUES (?)"
+            )
+            .bind(path)
+            .execute(&mut *tx)
+            .await?;
+            inserted += result.rows_affected();
+        }
+
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
+    pub async fn set_info(&self, id: i64, info_id: Option<i64>) -> Result<()> {
+        sqlx::query(
+            "UPDATE comicbooks SET id_comicbook_info = ? WHERE id_comicbook = ?"
+        )
+        .bind(info_id)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_papelera(&self, id: i64, en_papelera: bool) -> Result<()> {
+        sqlx::query(
+            "UPDATE comicbooks SET en_papelera = ? WHERE id_comicbook = ?"
+        )
+        .bind(en_papelera)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_embedding(&self, id: i64, embedding_json: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE comicbooks SET embedding = ? WHERE id_comicbook = ?"
+        )
+        .bind(embedding_json)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_error_ultimo_escaneo(&self, id: i64, error: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE comicbooks SET error_ultimo_escaneo = ?, procesado = 1 WHERE id_comicbook = ?"
+        )
+        .bind(error)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_procesado(&self, id: i64, procesado: bool) -> Result<()> {
+        sqlx::query(
+            "UPDATE comicbooks SET procesado = ? WHERE id_comicbook = ?"
+        )
+        .bind(procesado)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM comicbooks WHERE id_comicbook = ?")
+            .bind(id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_missing_files(&self) -> Result<u64> {
+        let all = sqlx::query(
+            r#"SELECT id_comicbook, path FROM comicbooks"#
+        )
+        .fetch_all(self.pool)
+        .await?;
+
+        let mut tx = self.pool.begin().await?;
+        let mut deleted = 0u64;
+
+        for row in all {
+            let id: i64 = row.get(0);
+            let path: String = row.get(1);
+            if !std::path::Path::new(&path).exists() {
+                sqlx::query(
+                    "DELETE FROM comicbooks WHERE id_comicbook = ?"
+                )
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                deleted += 1;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn count(&self) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) FROM comicbooks WHERE en_papelera = 0"#
+        )
+        .fetch_one(self.pool)
+        .await?;
+        Ok(row.get(0))
+    }
+
+    pub async fn count_uncatalogued(&self) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) FROM comicbooks WHERE id_comicbook_info IS NULL AND en_papelera = 0"#
+        )
+        .fetch_one(self.pool)
+        .await?;
+        Ok(row.get(0))
+    }
+
+    pub async fn count_with_errors(&self) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) FROM comicbooks WHERE error_ultimo_escaneo IS NOT NULL AND en_papelera = 0"#
+        )
+        .fetch_one(self.pool)
+        .await?;
+        Ok(row.get(0))
+    }
+}

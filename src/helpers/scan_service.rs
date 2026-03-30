@@ -1,0 +1,211 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::Result;
+use sqlx::SqlitePool;
+
+use crate::repositories::ComicbookRepository;
+
+use super::{
+    extractor::extract_cover,
+    paths::{comic_thumbnail_path, ensure_thumbnail_dirs},
+    scanner::scan_directories,
+    thumbnail::{thumbnail_exists, CardSize},
+};
+
+/// Flag global para detener todas las tareas pesadas (escaneo, thumbnails) al cerrar la app.
+pub static STOP_THREADS: AtomicBool = AtomicBool::new(false);
+
+pub struct ScanResult {
+    pub total_found: usize,
+    pub new_inserted: u64,
+    pub covers_generated: u32,
+    pub errors: Vec<String>,
+}
+
+/// Escanea los directorios configurados, inserta comics nuevos en la BD
+/// y genera thumbnails de portada para los que no los tienen.
+pub async fn run_scan(pool: &SqlitePool, dirs: &[String], card_size: CardSize) -> Result<ScanResult> {
+    let mut result = ScanResult {
+        total_found: 0,
+        new_inserted: 0,
+        covers_generated: 0,
+        errors: Vec::new(),
+    };
+
+    ensure_thumbnail_dirs()?;
+
+    // 1. Escanear directorios (operación bloqueante — se ejecuta en hilo aparte)
+    let dirs_owned = dirs.to_vec();
+    let paths = tokio::task::spawn_blocking(move || scan_directories(&dirs_owned))
+        .await?;
+
+    result.total_found = paths.len();
+    tracing::info!("Escaneo: {} archivos de comic encontrados", paths.len());
+
+    // 2. Insertar nuevos en la BD
+    let repo = ComicbookRepository::new(pool);
+    result.new_inserted = repo.insert_batch(&paths).await?;
+    tracing::info!("{} comics nuevos insertados", result.new_inserted);
+
+    // 3. Eliminar entradas de archivos que ya no existen en disco
+    let deleted = repo.delete_missing_files().await?;
+    if deleted > 0 {
+        tracing::info!("{} comics eliminados (archivos no encontrados en disco)", deleted);
+    }
+
+    // 4. Generar thumbnails en paralelo con Rayon
+    //    Solo para archivos del escaneo actual que aún NO están procesados.
+    let scanned: std::collections::HashSet<String> = paths.into_iter().collect();
+    let all_comics = repo.get_all_view(false).await?;
+    // Filtrar los que realmente necesitan trabajo:
+    // - Deben estar en el escaneo actual.
+    // - NO deben estar marcados como procesados.
+    // - El thumbnail no debe existir (por si acaso).
+    let pending: Vec<(i64, String)> = all_comics
+        .into_iter()
+        .filter(|c| scanned.contains(&c.path))
+        // Saltamos si el thumbnail ya existe en disco.
+        // Si procesado=1 pero el thumbnail desapareció (y no hay error conocido), reintentamos.
+        .filter(|c| !thumbnail_exists(&comic_thumbnail_path(c.id_comicbook, card_size)))
+        .filter(|c| c.error_ultimo_escaneo.is_none()) // no reintentar errores conocidos
+        .map(|c| (c.id_comicbook, c.path))
+        .collect();
+
+    let total_pending = pending.len();
+    if total_pending > 0 {
+        tracing::info!("Generando thumbnails para {} comics en paralelo...", total_pending);
+        let (generated, errors_batch) = generate_thumbnails_batch(pool, pending, card_size).await?;
+        result.covers_generated = generated;
+        result.errors = errors_batch;
+    }
+
+    tracing::info!(
+        "Escaneo completado — {} portadas generadas, {} errores",
+        result.covers_generated,
+        result.errors.len()
+    );
+
+    Ok(result)
+}
+
+/// Genera thumbnails para todos los comics que no tienen uno en disco y no han sido procesados.
+pub async fn generate_missing_thumbnails(pool: &SqlitePool, card_size: CardSize) -> Result<ScanResult> {
+    let mut result = ScanResult {
+        total_found: 0,
+        new_inserted: 0,
+        covers_generated: 0,
+        errors: Vec::new(),
+    };
+
+    ensure_thumbnail_dirs()?;
+
+    let repo = ComicbookRepository::new(pool);
+    let all_comics = repo.get_all_view(false).await?;
+    let pending: Vec<(i64, String)> = all_comics
+        .into_iter()
+        .filter(|c| !thumbnail_exists(&comic_thumbnail_path(c.id_comicbook, card_size)))
+        .filter(|c| c.error_ultimo_escaneo.is_none()) // no reintentar errores conocidos
+        .map(|c| (c.id_comicbook, c.path))
+        .collect();
+
+    result.total_found = pending.len();
+
+    if pending.is_empty() {
+        return Ok(result);
+    }
+
+    tracing::info!("Thumbnails faltantes detectados: {} — generando en paralelo…", pending.len());
+
+    let (generated, errors_batch) = generate_thumbnails_batch(pool, pending, card_size).await?;
+    result.covers_generated = generated;
+    result.errors = errors_batch;
+
+    tracing::info!(
+        "Thumbnails faltantes completados — {} generados, {} errores",
+        result.covers_generated,
+        result.errors.len()
+    );
+
+    Ok(result)
+}
+
+/// Genera thumbnails en paralelo y registra los errores/éxito en la base de datos.
+async fn generate_thumbnails_batch(
+    pool: &SqlitePool,
+    pending: Vec<(i64, String)>,
+    _size: CardSize,
+) -> Result<(u32, Vec<String>)> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(i64, Option<String>)>();
+
+    // Rayon para la extracción/redimensión (CPU-bound).
+    // Usamos la mitad de los núcleos disponibles para no competir con la UI.
+    let rayon_handle = tokio::task::spawn_blocking(move || {
+        use rayon::prelude::*;
+
+        let bg_threads = (std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) / 2)
+            .max(1);
+        let bg_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(bg_threads)
+            .build()
+            .expect("no se pudo crear threadpool de rayon");
+
+        bg_pool.install(|| pending.into_par_iter()
+            .map(|(id, path)| {
+                // Si la app está cerrando, abortamos el procesamiento de este lote.
+                if STOP_THREADS.load(Ordering::Relaxed) {
+                    return (0u32, None);
+                }
+
+                // Si la UI ya lo generó prioritariamente, lo saltamos.
+                if thumbnail_exists(&comic_thumbnail_path(id, _size)) {
+                    return (0u32, None);
+                }
+
+                // Generamos SIEMPRE los 3 tamaños de una sola vez
+                match extract_cover(&path).and_then(|bytes| super::thumbnail::generate_all_thumbnails(&bytes, id)) {
+                    Ok(()) => {
+                        let _ = tx.send((id, None));
+                        (1u32, None)
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let _ = tx.send((id, Some(msg.clone())));
+                        (0u32, Some(format!("Error en '{}': {}", path, msg)))
+                    }
+                }
+            })
+            .fold(
+                || (0u32, Vec::<String>::new()),
+                |(ok, mut errs), (n, err)| {
+                    if let Some(e) = err { errs.push(e); }
+                    (ok + n, errs)
+                },
+            )
+            .reduce(
+                || (0u32, Vec::new()),
+                |(ok1, mut errs1), (ok2, errs2)| {
+                    errs1.extend(errs2);
+                    (ok1 + ok2, errs1)
+                },
+            ))
+    });
+
+    // Mientras Rayon trabaja, persistimos resultados en la BD (I/O-bound)
+    let db_pool = pool.clone();
+    let db_handle = tokio::spawn(async move {
+        let repo = ComicbookRepository::new(&db_pool);
+        while let Some((id, error)) = rx.recv().await {
+            // set_error_ultimo_escaneo ahora también pone procesado = 1
+            if let Err(e) = repo.set_error_ultimo_escaneo(id, error.as_deref()).await {
+                tracing::error!("Error guardando estado de escaneo para comic {}: {}", id, e);
+            }
+        }
+    });
+
+    let (generated, errors) = rayon_handle.await?;
+    db_handle.await?;
+
+    Ok((generated, errors))
+}

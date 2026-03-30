@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE comicbooks_info_covers SET ruta_local = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0bab7820227f7a1d9e50c92f7326fc51c597e35c78149374cf519f5376937860"
+}

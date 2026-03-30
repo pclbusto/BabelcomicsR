@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Babelcomics
+GenericName=Comic Reader
+Comment=Gestor y lector de cómics
+Exec=babelcomics %f
+Icon=babelcomics
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;Comics;
+MimeType=application/x-cbz;application/x-cbr;application/x-cb7;application/zip;application/x-rar;application/x-7z-compressed;
+Keywords=comic;cbz;cbr;cb7;manga;reader;
+StartupNotify=true
+StartupWMClass=babelcomics

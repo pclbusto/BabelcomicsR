@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE setups SET api_key_encrypted = ? WHERE setupkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a9d2d16bb4288d08cca46c483dc07f84e1069208cbb7012199c1c6c321e29b17"
+}

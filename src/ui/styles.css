@@ -1,0 +1,94 @@
+.comic-card {
+    border-radius: 12px;
+    padding: 8px;
+    transition: all 200ms ease;
+    background-color: transparent;
+}
+
+.comic-card:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.comic-cover-container {
+    border-radius: 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.comic-cover-frame {
+    border-radius: 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.comic-cover-placeholder {
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+}
+
+.issue-number-overlay {
+    background-color: white;
+    color: black;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 2px 6px;
+    margin: 8px;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.heading {
+    font-weight: bold;
+    font-size: 14px;
+    color: #eeeeee;
+}
+
+.dim-label {
+    color: #999999;
+}
+
+.caption {
+    font-size: 11px;
+}
+
+.success {
+    color: #26a269; /* Verde GNOME */
+}
+
+.warning {
+    color: #e5a50a; /* Amarillo/Naranja GNOME */
+}
+
+.accent {
+    color: #3584e4; /* Azul GNOME */
+}
+
+.cover-image {
+    /* Shadow and padding handled in container or here if needed */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    border-radius: 12px;
+}
+
+.card {
+    border-radius: 12px;
+    background-color: transparent;
+    transition: all 200ms ease;
+    border: 2px solid transparent;
+}
+
+.card:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.card.selected {
+    background-color: rgba(53, 132, 228, 0.15);
+    border-color: #3584e4;
+}
+
+.missing-comic {
+    filter: grayscale(100%);
+    opacity: 0.7;
+}
+
+.missing-comic:hover {
+    filter: grayscale(50%);
+    opacity: 0.9;
+}

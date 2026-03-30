@@ -1,0 +1,12 @@
+    if let Some(num) = numero {
+        let num_tag = gtk::Label::builder()
+            .label(num)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Start)
+            .css_classes(["issue-number-overlay"])
+            .build();
+        overlay.add_overlay(&num_tag);
+    }
+
+    overlay.upcast()
+}

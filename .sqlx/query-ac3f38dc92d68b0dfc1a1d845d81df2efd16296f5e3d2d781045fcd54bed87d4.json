@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO setup_directorios (path, setup_key) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ac3f38dc92d68b0dfc1a1d845d81df2efd16296f5e3d2d781045fcd54bed87d4"
+}

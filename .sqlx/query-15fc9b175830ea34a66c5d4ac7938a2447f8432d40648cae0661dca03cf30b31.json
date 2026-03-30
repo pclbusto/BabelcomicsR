@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                id_publisher as \"id_publisher!: i64\",\n                nombre as \"nombre!: String\",\n                descripcion,\n                id_comicvine,\n                image_url\n               FROM publishers WHERE id_comicvine = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id_publisher!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "nombre!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "descripcion",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "id_comicvine",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "image_url",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "15fc9b175830ea34a66c5d4ac7938a2447f8432d40648cae0661dca03cf30b31"
+}

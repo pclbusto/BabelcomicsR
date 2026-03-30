@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                id as \"id!: i64\",\n                id_comicbook_info as \"id_comicbook_info!: i64\",\n                url_original as \"url_original!: String\",\n                ruta_local\n               FROM comicbooks_info_covers WHERE id_comicbook_info = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "id_comicbook_info!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "url_original!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "ruta_local",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "821d4403df1a7cffa87f0bbe8136a5d2fef444f6e6576dd14c3115c95a22dcec"
+}
