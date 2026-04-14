@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sqlx::{SqlitePool, Row};
 
-use crate::models::{Comicbook, ComicFilter, ComicbookView, NewComicbook};
+use crate::models::{Comicbook, ComicFilter, ComicbookView, NewComicbook, parse_search_query};
 
 pub struct ComicbookRepository<'a> {
     pool: &'a SqlitePool,
@@ -58,11 +58,19 @@ impl<'a> ComicbookRepository<'a> {
         incluir_papelera: bool,
         filter: Option<&ComicFilter>,
     ) -> Result<Vec<ComicbookView>> {
-        let q = filter.and_then(|f| f.query.as_deref()).map(|s| format!("%{}%", s));
         let clasificado = filter.and_then(|f| f.clasificado);
         let min_q = filter.and_then(|f| f.min_calidad).map(|v| v as i64);
 
-        let rows = sqlx::query(
+        // Parsear la búsqueda en tokens AND / NOT
+        let parsed = filter
+            .and_then(|f| f.query.as_deref())
+            .map(parse_search_query)
+            .unwrap_or_default();
+
+        // Construir fragmento WHERE dinámico para la búsqueda
+        let (search_sql, search_binds) = build_search_fragment(&parsed);
+
+        let sql = format!(
             r#"SELECT
                 cb.id_comicbook,
                 cb.path,
@@ -84,20 +92,24 @@ impl<'a> ComicbookRepository<'a> {
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
                LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
                WHERE (? = 1 OR cb.en_papelera = 0)
-                 AND (? IS NULL OR (COALESCE(ci.titulo, '') LIKE ? OR cb.path LIKE ? OR COALESCE(v.nombre, '') LIKE ?))
+                 {search_sql}
                  AND (? IS NULL OR (ci.id_comicbook_info IS NOT NULL) = ?)
                  AND (? IS NULL OR CAST(cb.calidad AS INTEGER) >= ?)
                ORDER BY COALESCE(ci.titulo, cb.path) COLLATE NOCASE
                LIMIT ? OFFSET ?"#
-        )
-        .bind(incluir_papelera)
-        .bind(&q).bind(&q).bind(&q).bind(&q)
-        .bind(clasificado).bind(clasificado)
-        .bind(min_q).bind(min_q)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(self.pool)
-        .await?;
+        );
+
+        let mut q = sqlx::query(&sql).bind(incluir_papelera);
+        for bind in &search_binds {
+            q = q.bind(bind);
+        }
+        let rows = q
+            .bind(clasificado).bind(clasificado)
+            .bind(min_q).bind(min_q)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(self.pool)
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -299,6 +311,30 @@ impl<'a> ComicbookRepository<'a> {
         Ok(())
     }
 
+    /// Guarda el embedding visual CLIP (BLOB de 512 × f32 = 2048 bytes).
+    pub async fn set_clip_embedding(&self, id: i64, blob: &[u8]) -> Result<()> {
+        sqlx::query(
+            "UPDATE comicbooks SET clip_embedding = ? WHERE id_comicbook = ?"
+        )
+        .bind(blob)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Devuelve el embedding CLIP almacenado para un comic, o `None` si no existe.
+    pub async fn get_clip_embedding(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query(
+            "SELECT clip_embedding FROM comicbooks WHERE id_comicbook = ?"
+        )
+        .bind(id)
+        .fetch_optional(self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.get(0)))
+    }
+
+
     pub async fn set_error_ultimo_escaneo(&self, id: i64, error: Option<&str>) -> Result<()> {
         sqlx::query(
             "UPDATE comicbooks SET error_ultimo_escaneo = ?, procesado = 1 WHERE id_comicbook = ?"
@@ -319,6 +355,25 @@ impl<'a> ComicbookRepository<'a> {
         .execute(self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn get_by_info_id(&self, info_id: i64) -> Result<Vec<Comicbook>> {
+        let rows = sqlx::query_as::<_, Comicbook>(
+            r#"SELECT
+                id_comicbook,
+                path,
+                id_comicbook_info,
+                calidad,
+                en_papelera,
+                embedding,
+                error_ultimo_escaneo,
+                procesado
+               FROM comicbooks WHERE id_comicbook_info = ?"#
+        )
+        .bind(info_id)
+        .fetch_all(self.pool)
+        .await?;
+        Ok(rows)
     }
 
     pub async fn delete(&self, id: i64) -> Result<()> {
@@ -383,4 +438,97 @@ impl<'a> ComicbookRepository<'a> {
         .await?;
         Ok(row.get(0))
     }
+
+    /// Total de comics que coinciden con un filtro (sin paginación).
+    pub async fn count_filtered(&self, filter: &ComicFilter) -> Result<i64> {
+        let clasificado = filter.clasificado;
+        let min_q = filter.min_calidad.map(|v| v as i64);
+
+        let parsed = filter.query.as_deref()
+            .map(parse_search_query)
+            .unwrap_or_default();
+
+        let (search_sql, search_binds) = build_search_fragment(&parsed);
+
+        let sql = format!(
+            r#"SELECT COUNT(*)
+               FROM comicbooks cb
+               LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
+               LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
+               WHERE cb.en_papelera = 0
+                 {search_sql}
+                 AND (? IS NULL OR (ci.id_comicbook_info IS NOT NULL) = ?)
+                 AND (? IS NULL OR CAST(cb.calidad AS INTEGER) >= ?)"#
+        );
+
+        let mut q = sqlx::query(&sql);
+        for bind in &search_binds {
+            q = q.bind(bind);
+        }
+        let row = q
+            .bind(clasificado).bind(clasificado)
+            .bind(min_q).bind(min_q)
+            .fetch_one(self.pool)
+            .await?;
+        Ok(row.get(0))
+    }
+
+    /// Comics que aún no tienen thumbnail generado (procesado = 0, sin error previo).
+    pub async fn count_without_thumbnail(&self) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) FROM comicbooks
+               WHERE procesado = 0
+                 AND en_papelera = 0
+                 AND error_ultimo_escaneo IS NULL"#
+        )
+        .fetch_one(self.pool)
+        .await?;
+        Ok(row.get(0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers de búsqueda
+// ---------------------------------------------------------------------------
+
+/// Genera el fragmento SQL WHERE y los valores a bindear para la búsqueda avanzada.
+///
+/// Los campos buscados son:
+/// - `ci.titulo` (título del issue)
+/// - `cb.path` (ruta del archivo)
+/// - `v.nombre` (nombre de la serie)
+///
+/// Cada palabra de inclusión genera:
+///   `AND (col1 LIKE ? OR col2 LIKE ? OR col3 LIKE ?)`
+///
+/// Cada palabra de exclusión genera:
+///   `AND (col1 NOT LIKE ? AND col2 NOT LIKE ? AND col3 NOT LIKE ?)`
+fn build_search_fragment(
+    parsed: &crate::models::ParsedQuery,
+) -> (String, Vec<String>) {
+    if parsed.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    const COLS: &str =
+        "COALESCE(ci.titulo, '') LIKE ? OR cb.path LIKE ? OR COALESCE(v.nombre, '') LIKE ?";
+    const NOT_COLS: &str =
+        "COALESCE(ci.titulo, '') NOT LIKE ? AND cb.path NOT LIKE ? AND COALESCE(v.nombre, '') NOT LIKE ?";
+
+    let mut parts = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+
+    for word in &parsed.must_include {
+        let pat = format!("%{}%", word);
+        parts.push(format!("AND ({})", COLS));
+        binds.extend([pat.clone(), pat.clone(), pat]);
+    }
+
+    for word in &parsed.must_exclude {
+        let pat = format!("%{}%", word);
+        parts.push(format!("AND ({})", NOT_COLS));
+        binds.extend([pat.clone(), pat.clone(), pat]);
+    }
+
+    (parts.join("\n                 "), binds)
 }

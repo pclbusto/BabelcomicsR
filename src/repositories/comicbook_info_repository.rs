@@ -269,4 +269,89 @@ impl<'a> ComicbookInfoRepository<'a> {
         .await?;
         Ok(())
     }
+
+    // --- Embeddings CLIP ---
+
+    pub async fn set_cover_clip_embedding(&self, cover_id: i64, blob: &[u8]) -> Result<()> {
+        sqlx::query("UPDATE comicbooks_info_covers SET clip_embedding = ? WHERE id = ?")
+            .bind(blob)
+            .bind(cover_id)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// (cover_id, ruta_local_or_empty, url_original, vol_nombre, id_volume) para todas las portadas sin embedding CLIP.
+    /// Si ruta_local está seteada se usa directamente; si no, se reconstruye el path desde url+vol.
+    pub async fn get_covers_without_clip_embedding(&self) -> Result<Vec<(i64, String, String, String, i64)>> {
+        self.get_covers_for_clip(None, true).await
+    }
+
+    /// Devuelve portadas para indexación CLIP.
+    ///
+    /// - `volume_id`: si es `Some`, filtra solo las portadas del volumen dado.
+    /// - `solo_faltantes`: si es `true`, devuelve solo las que no tienen embedding aún.
+    pub async fn get_covers_for_clip(
+        &self,
+        volume_id: Option<i64>,
+        solo_faltantes: bool,
+    ) -> Result<Vec<(i64, String, String, String, i64)>> {
+        use sqlx::Row;
+
+        let sql = format!(
+            r#"SELECT cic.id,
+                      COALESCE(cic.ruta_local, ''),
+                      COALESCE(cic.url_original, ''),
+                      COALESCE(v.nombre, ''),
+                      COALESCE(ci.id_volume, 0)
+               FROM comicbooks_info_covers cic
+               LEFT JOIN comicbooks_info ci ON ci.id_comicbook_info = cic.id_comicbook_info
+               LEFT JOIN volumens v ON v.id_volume = ci.id_volume
+               WHERE {}{}
+               ORDER BY cic.id"#,
+            if solo_faltantes { "cic.clip_embedding IS NULL" } else { "1=1" },
+            if volume_id.is_some() { " AND ci.id_volume = ?" } else { "" },
+        );
+
+        let mut q = sqlx::query(&sql);
+        if let Some(vid) = volume_id {
+            q = q.bind(vid);
+        }
+
+        let rows = q.fetch_all(self.pool).await?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4))).collect())
+    }
+
+    /// (id_comicbook_info, clip_embedding) de todas las portadas indexadas.
+    pub async fn get_all_cover_clip_embeddings(&self) -> Result<Vec<(i64, Vec<u8>)>> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            r#"SELECT id_comicbook_info, clip_embedding
+               FROM comicbooks_info_covers
+               WHERE clip_embedding IS NOT NULL
+               ORDER BY id_comicbook_info, id"#,
+        )
+        .fetch_all(self.pool)
+        .await?;
+        Ok(rows.into_iter().filter_map(|r| {
+            let blob: Option<Vec<u8>> = r.get(1);
+            blob.map(|b| (r.get(0), b))
+        }).collect())
+    }
+
+    /// (total, con_archivo_local, ya_indexadas, pendientes)
+    pub async fn count_clip_index_stats(&self) -> Result<(i64, i64, i64, i64)> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            r#"SELECT
+                COUNT(*),
+                COUNT(CASE WHEN ruta_local IS NOT NULL THEN 1 END),
+                COUNT(CASE WHEN clip_embedding IS NOT NULL THEN 1 END),
+                COUNT(CASE WHEN ruta_local IS NOT NULL AND clip_embedding IS NULL THEN 1 END)
+               FROM comicbooks_info_covers"#,
+        )
+        .fetch_one(self.pool)
+        .await?;
+        Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
+    }
 }

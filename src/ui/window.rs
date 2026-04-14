@@ -59,7 +59,7 @@ pub fn build(app: &adw::Application, pool: SqlitePool) -> adw::ApplicationWindow
 
     // Botón de estadísticas (información)
     let stats_btn = gtk::MenuButton::builder()
-        .icon_name("info-symbolic")
+        .icon_name("help-about-symbolic")
         .tooltip_text("Estadísticas")
         .popover(&pages::statistics::build_popover(pool.clone()))
         .build();
@@ -88,20 +88,189 @@ pub fn build(app: &adw::Application, pool: SqlitePool) -> adw::ApplicationWindow
         }
     ));
 
-    win.set_content(Some(&tab_overview));
+    // ToastOverlay: envuelve el contenido para poder mostrar notificaciones
+    let toast_overlay = adw::ToastOverlay::new();
+    toast_overlay.set_child(Some(&tab_overview));
+    win.set_content(Some(&toast_overlay));
 
     // Abrir tabs por defecto
     add_tab(&tab_view, TabKind::Comics(pool.clone()));
     add_tab(&tab_view, TabKind::Volumes(pool.clone()));
     add_tab(&tab_view, TabKind::Publishers);
-    add_tab(&tab_view, TabKind::Downloads);
+    add_tab(&tab_view, TabKind::Downloads(pool.clone()));
 
     // Atajos de teclado
     setup_shortcuts(&win, &tab_view, &tab_overview);
 
+    // Acción de ventana: generar embeddings CLIP manualmente
+    setup_generate_clip_action(&win, &toast_overlay, pool.clone());
+
+    // Acción de ventana: descargar portadas faltantes + generar embeddings
+    setup_download_covers_action(&win, &toast_overlay, pool);
+
     win.maximize();
 
     win
+}
+
+/// Registra la acción `win.download-covers` que busca portadas ya descargadas en disco,
+/// las enlaza en la BD si falta `ruta_local`, y luego genera los embeddings CLIP.
+/// No descarga ningún archivo nuevo.
+fn setup_download_covers_action(
+    win: &adw::ApplicationWindow,
+    toast_overlay: &adw::ToastOverlay,
+    pool: SqlitePool,
+) {
+    let action = gio::SimpleAction::new("download-covers", None);
+
+    let overlay_weak = toast_overlay.downgrade();
+    let action_ref = action.downgrade();
+
+    action.connect_activate(move |act, _| {
+        act.set_enabled(false);
+
+        if let Some(overlay) = overlay_weak.upgrade() {
+            overlay.add_toast(
+                adw::Toast::builder()
+                    .title("Indexando portadas existentes…")
+                    .timeout(0)
+                    .build(),
+            );
+        }
+
+        let pool_task = pool.clone();
+        let overlay_done = overlay_weak.clone();
+        let action_done = action_ref.clone();
+
+        crate::ui::run_in_background(
+            tokio::runtime::Handle::current(),
+            async move {
+                // 1. Enlazar en BD las portadas que ya están en disco
+                let link_result = crate::helpers::scan_service::relink_covers_from_disk(&pool_task).await;
+                // 2. Generar embeddings CLIP para todas las que tienen ruta_local
+                let clip_result = crate::helpers::scan_service::generate_missing_clip_embeddings(&pool_task).await;
+                (link_result, clip_result)
+            },
+            move |(link_result, clip_result)| {
+                if let Some(a) = action_done.upgrade() {
+                    a.set_enabled(true);
+                }
+
+                if let Some(overlay) = overlay_done.upgrade() {
+                    let msg = match (link_result, clip_result) {
+                        (Ok((0, _)), Ok((0, _))) => "No se encontraron portadas nuevas en disco".to_string(),
+                        (Ok((lk, _)), Ok((cl, errs))) => {
+                            let mut parts = Vec::new();
+                            if lk > 0 { parts.push(format!("{} portadas enlazadas desde disco", lk)); }
+                            if cl > 0 { parts.push(format!("{} embeddings CLIP generados", cl)); }
+                            if !errs.is_empty() { parts.push(format!("{} errores (ver log)", errs.len())); }
+                            if parts.is_empty() { "Todo ya estaba indexado".to_string() } else { parts.join(", ") }
+                        }
+                        (Err(e), _) => format!("Error escaneando disco: {e}"),
+                        (_, Err(e)) => format!("Error generando CLIP: {e}"),
+                    };
+                    overlay.add_toast(adw::Toast::builder().title(&msg).timeout(8).build());
+                }
+            },
+        );
+    });
+
+    win.add_action(&action);
+}
+
+/// Registra la acción `win.generate-clip` que lanza la indexación CLIP en segundo plano.
+/// Antes de comenzar muestra un diálogo que pregunta si indexar solo las portadas faltantes
+/// o reindexar todo.
+fn setup_generate_clip_action(
+    win: &adw::ApplicationWindow,
+    toast_overlay: &adw::ToastOverlay,
+    pool: SqlitePool,
+) {
+    let action = gio::SimpleAction::new("generate-clip", None);
+
+    let overlay_weak = toast_overlay.downgrade();
+    let win_weak = win.downgrade();
+
+    action.connect_activate(move |_act, _| {
+        let dialog = adw::AlertDialog::builder()
+            .heading("Generar embeddings CLIP")
+            .body("¿Qué portadas quieres indexar?")
+            .build();
+        dialog.add_response("cancel", "Cancelar");
+        dialog.add_response("missing", "Solo faltantes");
+        dialog.add_response("all", "Reindexar todo");
+        dialog.set_default_response(Some("missing"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_appearance("all", adw::ResponseAppearance::Destructive);
+
+        let overlay_clone = overlay_weak.clone();
+        let pool_clone = pool.clone();
+
+        dialog.connect_response(None, move |_d, response| {
+            if response == "cancel" { return; }
+            let solo_faltantes = response != "all";
+            run_clip_generation(None, solo_faltantes, pool_clone.clone(), Some(overlay_clone.clone()));
+        });
+
+        dialog.present(win_weak.upgrade().as_ref());
+    });
+
+    win.add_action(&action);
+}
+
+/// Lanza la generación de embeddings CLIP en background y muestra toasts de progreso/resultado.
+///
+/// - `volume_id`: si es `Some`, limita la indexación a ese volumen.
+/// - `solo_faltantes`: si es `false`, reindexará aunque ya exista embedding.
+/// - `overlay_weak`: si es `None`, no se muestran toasts.
+pub(crate) fn run_clip_generation(
+    volume_id: Option<i64>,
+    solo_faltantes: bool,
+    pool: SqlitePool,
+    overlay_weak: Option<glib::WeakRef<adw::ToastOverlay>>,
+) {
+    if let Some(ref ow) = overlay_weak {
+        if let Some(overlay) = ow.upgrade() {
+            let msg = if solo_faltantes { "Indexando portadas faltantes…" } else { "Reindexando todas las portadas…" };
+            overlay.add_toast(adw::Toast::builder().title(msg).timeout(3).build());
+        }
+    }
+
+    crate::ui::run_in_background(
+        tokio::runtime::Handle::current(),
+        async move {
+            let info_repo = crate::repositories::ComicbookInfoRepository::new(&pool);
+            let stats = info_repo.count_clip_index_stats().await.unwrap_or((0, 0, 0, 0));
+            tracing::info!(
+                "CLIP índice — total covers: {}, con archivo: {}, indexadas: {}, pendientes: {}",
+                stats.0, stats.1, stats.2, stats.3
+            );
+            let result = crate::helpers::scan_service::generate_clip_embeddings(
+                &pool, volume_id, solo_faltantes,
+            ).await;
+            (result, stats)
+        },
+        move |(result, stats)| {
+            let Some(ref ow) = overlay_weak else { return };
+            let Some(overlay) = ow.upgrade() else { return };
+            let (total, con_archivo, indexadas, pendientes) = stats;
+            let msg = match result {
+                Ok((0, _)) if con_archivo == 0 => format!(
+                    "Sin portadas descargadas ({total} issues en BD)."
+                ),
+                Ok((0, _)) => format!(
+                    "{indexadas} portadas ya indexadas de {con_archivo} con archivo local"
+                ),
+                Ok((n, errs)) if errs.is_empty() => format!(
+                    "CLIP: {n} portadas indexadas ({total} total, {} pendientes)",
+                    pendientes.saturating_sub(n as i64)
+                ),
+                Ok((n, errs)) => format!("CLIP: {n} indexadas, {} errores (ver log)", errs.len()),
+                Err(e) => format!("CLIP error: {e}"),
+            };
+            overlay.add_toast(adw::Toast::builder().title(&msg).timeout(6).build());
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +282,7 @@ pub enum TabKind {
     Comics(SqlitePool),
     Volumes(SqlitePool),
     Publishers,
-    Downloads,
+    Downloads(SqlitePool),
     ComicVineSearch(SqlitePool),
     /// Página temporal que permite elegir el tipo de tab
     Selector(SqlitePool),
@@ -121,6 +290,10 @@ pub enum TabKind {
     ComicDetail(i64, SqlitePool),
     /// Detalle de un volumen (serie) específico
     VolumeDetail(i64, SqlitePool),
+    /// Detalle de un issue (número) específico
+    IssueDetail(i64, SqlitePool),
+    /// Catalogación inteligente por similitud visual CLIP
+    CatalogacionInteligente(Vec<i64>, SqlitePool),
 }
 
 /// Crea una nueva pestaña del tipo dado y la añade al TabView.
@@ -147,6 +320,25 @@ pub fn add_tab(tab_view: &adw::TabView, kind: TabKind) -> adw::TabPage {
         return page;
     }
 
+    if let TabKind::IssueDetail(issue_info_id, pool) = kind {
+        let content = pages::issue_detail::build(issue_info_id, pool.clone());
+        let page = tab_view.append(&content);
+        page.set_title("Detalle de issue");
+        page.set_icon(Some(&gio::ThemedIcon::new("image-x-generic-symbolic")));
+        page.set_needs_attention(false);
+        pages::issue_detail::setup_tab_title(issue_info_id, pool, page.downgrade());
+        return page;
+    }
+
+    if let TabKind::CatalogacionInteligente(ids, pool) = kind {
+        let content = pages::catalogacion_inteligente::build(ids, pool);
+        let page = tab_view.append(&content);
+        page.set_title("Catalogación Inteligente");
+        page.set_icon(Some(&gio::ThemedIcon::new("find-location-symbolic")));
+        page.set_needs_attention(false);
+        return page;
+    }
+
     let (title, icon_name, content): (String, &str, gtk::Widget) = match kind {
         TabKind::Comics(pool) => (
             "Comics".into(),
@@ -155,7 +347,7 @@ pub fn add_tab(tab_view: &adw::TabView, kind: TabKind) -> adw::TabPage {
         ),
         TabKind::Volumes(pool) => (
             "Series".into(),
-            "open-book-symbolic",
+            "accessories-dictionary-symbolic",
             pages::volumes::build(pool, tab_view.clone()),
         ),
 
@@ -164,10 +356,10 @@ pub fn add_tab(tab_view: &adw::TabView, kind: TabKind) -> adw::TabPage {
             "building-symbolic",
             pages::publishers::build(),
         ),
-        TabKind::Downloads => (
+        TabKind::Downloads(pool) => (
             "Descargas".into(),
             "folder-download-symbolic",
-            pages::downloads::build(),
+            pages::downloads::build(pool),
         ),
         TabKind::ComicVineSearch(pool) => (
             "Buscar en ComicVine".into(),
@@ -181,6 +373,8 @@ pub fn add_tab(tab_view: &adw::TabView, kind: TabKind) -> adw::TabPage {
         ),
         TabKind::ComicDetail(..) => unreachable!(),
         TabKind::VolumeDetail(..) => unreachable!(),
+        TabKind::IssueDetail(..) => unreachable!(),
+        TabKind::CatalogacionInteligente(..) => unreachable!(),
     };
 
     let page = tab_view.append(&content);
@@ -208,9 +402,9 @@ fn build_tab_type_popover(tab_view: &adw::TabView, pool: &SqlitePool) -> gtk::Po
 
     let kinds: Vec<(&str, &str, TabKind)> = vec![
         ("Comics",      "image-x-generic-symbolic", TabKind::Comics(pool.clone())),
-        ("Series",      "open-book-symbolic",        TabKind::Volumes(pool.clone())),
-        ("Editoriales", "building-symbolic",          TabKind::Publishers),
-        ("Descargas",   "folder-download-symbolic",  TabKind::Downloads),
+        ("Series",      "accessories-dictionary-symbolic", TabKind::Volumes(pool.clone())),
+        ("Editoriales", "building-symbolic", TabKind::Publishers),
+        ("Descargas",   "folder-download-symbolic",  TabKind::Downloads(pool.clone())),
         ("ComicVine",   "web-browser-symbolic",      TabKind::ComicVineSearch(pool.clone())),
     ];
 
@@ -260,9 +454,9 @@ fn build_selector_page(tab_view: &adw::TabView, pool: SqlitePool) -> gtk::Widget
 
     let kinds: Vec<(&str, &str, TabKind)> = vec![
         ("Comics",      "image-x-generic-symbolic", TabKind::Comics(pool.clone())),
-        ("Series",      "open-book-symbolic",        TabKind::Volumes(pool.clone())),
-        ("Editoriales", "building-symbolic",          TabKind::Publishers),
-        ("Descargas",   "folder-download-symbolic",  TabKind::Downloads),
+        ("Series",      "accessories-dictionary-symbolic", TabKind::Volumes(pool.clone())),
+        ("Editoriales", "building-symbolic", TabKind::Publishers),
+        ("Descargas",   "folder-download-symbolic",  TabKind::Downloads(pool.clone())),
         ("ComicVine",   "web-browser-symbolic",      TabKind::ComicVineSearch(pool.clone())),
     ];
 
@@ -309,6 +503,12 @@ fn build_selector_page(tab_view: &adw::TabView, pool: SqlitePool) -> gtk::Widget
 fn build_menu() -> gio::MenuModel {
     let menu = gio::Menu::new();
     menu.append(Some("Escanear directorios"), Some("app.scan"));
+    menu.append_section(None, &{
+        let section = gio::Menu::new();
+        section.append(Some("Indexar portadas existentes"), Some("win.download-covers"));
+        section.append(Some("Generar embeddings CLIP"), Some("win.generate-clip"));
+        section.upcast::<gio::MenuModel>()
+    });
     menu.append(Some("Preferencias"), Some("app.preferences"));
     menu.append_section(None, &{
         let section = gio::Menu::new();

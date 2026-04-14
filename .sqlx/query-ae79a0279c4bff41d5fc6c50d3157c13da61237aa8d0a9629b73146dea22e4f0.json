@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n                setupkey as \"setupkey!: String\",\n                api_key_encrypted,\n                modo_oscuro as \"modo_oscuro!: bool\",\n                thumbnail_size as \"thumbnail_size!: i64\",\n                items_por_pagina as \"items_por_pagina!: i64\",\n                num_workers as \"num_workers!: i64\",\n                idioma,\n                carpeta_thumbnails,\n                intervalo_api as \"intervalo_api!: f64\",\n                carpeta_organizacion,\n                api_url\n               FROM setups WHERE setupkey = ?",
+  "query": "SELECT\n                setupkey as \"setupkey!: String\",\n                api_key_encrypted,\n                modo_oscuro as \"modo_oscuro!: bool\",\n                thumbnail_size as \"thumbnail_size!: i64\",\n                items_por_pagina as \"items_por_pagina!: i64\",\n                num_workers as \"num_workers!: i64\",\n                idioma,\n                carpeta_thumbnails,\n                intervalo_api as \"intervalo_api!: f64\",\n                api_url,\n                clip_al_arranque as \"clip_al_arranque!: bool\"\n               FROM setups WHERE setupkey = ?",
   "describe": {
     "columns": [
       {
@@ -49,14 +49,14 @@
         "type_info": "Float"
       },
       {
-        "name": "carpeta_organizacion",
+        "name": "api_url",
         "ordinal": 9,
         "type_info": "Text"
       },
       {
-        "name": "api_url",
+        "name": "clip_al_arranque!: bool",
         "ordinal": 10,
-        "type_info": "Text"
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -73,8 +73,8 @@
       true,
       true,
       true,
-      true
+      false
     ]
   },
-  "hash": "5ad554a2c38463e127e99c8b69c5f1e0b9c61a5fb83ed4b1c0f4ce11608915b0"
+  "hash": "ae79a0279c4bff41d5fc6c50d3157c13da61237aa8d0a9629b73146dea22e4f0"
 }

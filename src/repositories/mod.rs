@@ -10,4 +10,4 @@ pub use comicbook_info_repository::ComicbookInfoRepository;
 pub use comicbook_repository::ComicbookRepository;
 pub use publisher_repository::PublisherRepository;
 pub use setup_repository::SetupRepository;
-pub use volume_repository::VolumeRepository;
+pub use volume_repository::{VolumeRepository, VolumeSortOrder};

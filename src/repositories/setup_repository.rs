@@ -27,7 +27,8 @@ impl<'a> SetupRepository<'a> {
                 idioma,
                 carpeta_thumbnails,
                 intervalo_api as "intervalo_api!: f64",
-                api_url
+                api_url,
+                clip_al_arranque as "clip_al_arranque!: bool"
                FROM setups WHERE setupkey = ?"#,
             DEFAULT_KEY
         )
@@ -40,8 +41,8 @@ impl<'a> SetupRepository<'a> {
     pub async fn save(&self, setup: &Setup) -> Result<()> {
         sqlx::query!(
             r#"INSERT INTO setups
-                (setupkey, api_key_encrypted, modo_oscuro, thumbnail_size, items_por_pagina, num_workers, idioma, carpeta_thumbnails, intervalo_api, api_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (setupkey, api_key_encrypted, modo_oscuro, thumbnail_size, items_por_pagina, num_workers, idioma, carpeta_thumbnails, intervalo_api, api_url, clip_al_arranque)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(setupkey) DO UPDATE SET
                 api_key_encrypted  = excluded.api_key_encrypted,
                 modo_oscuro        = excluded.modo_oscuro,
@@ -51,7 +52,8 @@ impl<'a> SetupRepository<'a> {
                 idioma             = excluded.idioma,
                 carpeta_thumbnails = excluded.carpeta_thumbnails,
                 intervalo_api      = excluded.intervalo_api,
-                api_url            = excluded.api_url"#,
+                api_url            = excluded.api_url,
+                clip_al_arranque   = excluded.clip_al_arranque"#,
             setup.setupkey,
             setup.api_key_encrypted,
             setup.modo_oscuro,
@@ -61,7 +63,8 @@ impl<'a> SetupRepository<'a> {
             setup.idioma,
             setup.carpeta_thumbnails,
             setup.intervalo_api,
-            setup.api_url
+            setup.api_url,
+            setup.clip_al_arranque
         )
         .execute(self.pool)
         .await?;

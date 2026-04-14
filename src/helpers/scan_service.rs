@@ -4,10 +4,11 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 use crate::repositories::ComicbookRepository;
+use super::clip_embedder;
 
 use super::{
     extractor::extract_cover,
-    paths::{comic_thumbnail_path, ensure_thumbnail_dirs},
+    paths::{comic_thumbnail_path, comicbook_info_thumbnail_path, ensure_thumbnail_dirs},
     scanner::scan_directories,
     thumbnail::{thumbnail_exists, CardSize},
 };
@@ -127,6 +128,115 @@ pub async fn generate_missing_thumbnails(pool: &SqlitePool, card_size: CardSize)
     );
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Embeddings CLIP
+// ---------------------------------------------------------------------------
+
+/// Genera embeddings CLIP para todas las portadas ComicVine sin embedding.
+/// Compatibilidad: llama a `generate_clip_embeddings` con los parámetros por defecto.
+pub async fn generate_missing_clip_embeddings(pool: &SqlitePool) -> Result<(u32, Vec<String>)> {
+    generate_clip_embeddings(pool, None, true).await
+}
+
+/// Genera embeddings CLIP para portadas ComicVine.
+///
+/// - `volume_id`: si es `Some`, solo procesa las portadas de ese volumen.
+/// - `solo_faltantes`: si es `true`, omite las portadas que ya tienen embedding.
+pub async fn generate_clip_embeddings(
+    pool: &SqlitePool,
+    volume_id: Option<i64>,
+    solo_faltantes: bool,
+) -> Result<(u32, Vec<String>)> {
+    let pending = crate::repositories::ComicbookInfoRepository::new(pool)
+        .get_covers_for_clip(volume_id, solo_faltantes)
+        .await?;
+
+    if pending.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+
+    let total = pending.len();
+    tracing::info!("Indexando embeddings CLIP para {} portadas…", total);
+
+    // Fase 1: leer archivos en paralelo con rayon (I/O bound)
+    let file_data: Vec<(i64, Vec<u8>)> = tokio::task::spawn_blocking(move || {
+        use rayon::prelude::*;
+        pending
+            .into_par_iter()
+            .filter_map(|(cover_id, ruta_local, url_original, vol_nombre, id_volume)| {
+                if STOP_THREADS.load(std::sync::atomic::Ordering::Relaxed) { return None; }
+
+                let path = if !ruta_local.is_empty() {
+                    std::path::PathBuf::from(&ruta_local)
+                } else {
+                    let filename = url_original.split('/').last().unwrap_or("");
+                    if filename.is_empty() { return None; }
+                    comicbook_info_thumbnail_path(&vol_nombre, id_volume, filename)
+                };
+
+                if !path.exists() { return None; }
+
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        tracing::info!("Leído cover_id={cover_id} ({} bytes) — {}", bytes.len(), path.display());
+                        Some((cover_id, bytes))
+                    }
+                    Err(e) => {
+                        tracing::warn!("cover_id={cover_id} — error leyendo {}: {e}", path.display());
+                        None
+                    }
+                }
+            })
+            .collect()
+    }).await?;
+
+    tracing::info!("Archivos leídos: {}/{}. Iniciando inferencia CLIP…", file_data.len(), total);
+
+    // Fase 2: inferencia secuencial (el modelo CLIP usa todos los cores internamente via BLAS)
+    let db_pool = pool.clone();
+    let (generated, errors) = tokio::task::spawn_blocking(move || {
+        let repo_rt = tokio::runtime::Handle::current();
+        let repo = crate::repositories::ComicbookInfoRepository::new(&db_pool);
+        let mut generated = 0u32;
+        let mut errors = Vec::new();
+
+        for (i, (cover_id, bytes)) in file_data.iter().enumerate() {
+            if STOP_THREADS.load(std::sync::atomic::Ordering::Relaxed) { break; }
+
+            tracing::info!("[{}/{}] cover_id={cover_id} — generando embedding…", i + 1, file_data.len());
+            match clip_embedder::embed_image(bytes) {
+                Ok(emb) => {
+                    let blob = clip_embedder::to_bytes(&emb);
+                    match repo_rt.block_on(repo.set_cover_clip_embedding(*cover_id, &blob)) {
+                        Ok(_) => {
+                            generated += 1;
+                            tracing::info!("[{}/{}] cover_id={cover_id} — guardado (total: {generated})", i + 1, file_data.len());
+                        }
+                        Err(e) => {
+                            tracing::error!("cover_id={cover_id} — error BD: {e}");
+                            errors.push(format!("cover {cover_id}: bd: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[{}/{}] cover_id={cover_id} — error embedding: {e}", i + 1, file_data.len());
+                    errors.push(format!("cover {cover_id}: embed: {e}"));
+                }
+            }
+        }
+        (generated, errors)
+    }).await?;
+    tracing::info!("CLIP completado — {} indexadas, {} errores", generated, errors.len());
+    Ok((generated, errors))
+}
+
+/// Versión simplificada sin descarga: solo enlaza ruta_local en BD para portadas
+/// cuyo archivo ya existe en disco. No se usa actualmente pero se mantiene para
+/// posibles migraciones futuras.
+pub async fn relink_covers_from_disk(_pool: &SqlitePool) -> Result<(u32, Vec<String>)> {
+    Ok((0, Vec::new()))
 }
 
 /// Genera thumbnails en paralelo y registra los errores/éxito en la base de datos.

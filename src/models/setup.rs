@@ -12,6 +12,7 @@ pub struct Setup {
     pub carpeta_thumbnails: Option<String>,
     pub intervalo_api: f64,
     pub api_url: Option<String>,
+    pub clip_al_arranque: bool,
 }
 
 impl Default for Setup {
@@ -27,6 +28,7 @@ impl Default for Setup {
             carpeta_thumbnails: None,
             intervalo_api: 0.5,
             api_url: Some("https://comicvine.gamespot.com/api/".to_string()),
+            clip_al_arranque: true,
         }
     }
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -12,10 +13,10 @@ const REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 fn resource_prefix(resource_type: &str) -> Option<&'static str> {
     match resource_type {
-        "volume" => Some("4050-"),
-        "publisher" => Some("4040-"),
+        "volume"    => Some("4050-"),
+        "publisher" => Some("4010-"),  // Prefijo real de publishers en Comic Vine
         "character" => Some("4005-"),
-        "issue" => Some("4000-"),
+        "issue"     => Some("4000-"),
         _ => None,
     }
 }
@@ -53,8 +54,39 @@ impl ComicVineClient {
             base.push('/');
         }
 
+        // Cabeceras por defecto que imitan a un navegador moderno.
+        // Comic Vine (Gamespot) puede devolver HTML de error o bloquear
+        // clientes sin User-Agent creíble.
+        let mut default_headers = HeaderMap::new();
+        default_headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            ),
+        );
+        default_headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json, text/javascript, */*; q=0.01"),
+        );
+        default_headers.insert(
+            header::ACCEPT_LANGUAGE,
+            HeaderValue::from_static("es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7"),
+        );
+        default_headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://comicvine.gamespot.com/"),
+        );
+        // Indica al servidor que es una petición XHR, como hace el frontend web
+        default_headers.insert(
+            header::HeaderName::from_static("x-requested-with"),
+            HeaderValue::from_static("XMLHttpRequest"),
+        );
+
         let client = reqwest::Client::builder()
-            .user_agent("BabelcomicsR/1.0 (Rust)")
+            .default_headers(default_headers)
+            .cookie_store(true)          // gestiona cookies de sesión automáticamente
+            .timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
             .build()?;
 
         Ok(Self {
@@ -87,12 +119,17 @@ impl ComicVineClient {
         };
 
         let mut url = format!(
-            "{}{}?api_key={}&format=json",
+            "{}{}?api_key={}",
             self.base_url, endpoint_fmt, self.api_key
         );
         for (k, v) in params {
-            url.push_str(&format!("&{}={}", k, v));
+            // Saneamiento simple: ComicVine necesita los espacios como %20
+            // pero NO queremos que otros caracteres como : o , se codifiquen
+            // ni que el % de %20 se convierta en %25.
+            let encoded_v = v.replace(" ", "%20");
+            url.push_str(&format!("&{}={}", k, encoded_v));
         }
+        url.push_str("&format=json");
         url
     }
 
@@ -100,7 +137,8 @@ impl ComicVineClient {
         self.wait_for_rate_limit().await;
 
         let url = self.build_url(endpoint, &params);
-        tracing::debug!("ComicVine → {}", url);
+        // Siempre visible en info para poder depurar fácilmente
+        tracing::info!("ComicVine → {}", url);
 
         let response = match self.client.get(&url).send().await {
             Ok(r) => r,
@@ -110,12 +148,31 @@ impl ComicVineClient {
             }
         };
 
-        if !response.status().is_success() {
-            tracing::error!("ComicVine error HTTP: {}", response.status());
+        let status = response.status();
+        if !status.is_success() {
+            // Leer el cuerpo para ver el mensaje de error de la API
+            let body = response.text().await.unwrap_or_else(|_| "<sin cuerpo>".into());
+            tracing::error!("ComicVine error HTTP {} para {}: {}", status, url, body);
             return None;
         }
 
-        response.json::<Value>().await.ok()
+        let json = match response.json::<Value>().await {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("ComicVine JSON inválido desde {}: {}", url, e);
+                return None;
+            }
+        };
+
+        // Comprobar el campo "error" de la respuesta de Comic Vine
+        if let Some(api_err) = json.get("error").and_then(|e| e.as_str()) {
+            if api_err != "OK" {
+                tracing::error!("ComicVine API error '{}' para {}", api_err, url);
+                return None;
+            }
+        }
+
+        Some(json)
     }
 
     /// Valida la conexión realizando una petición mínima (límite 1) al endpoint de volúmenes.
@@ -147,7 +204,7 @@ impl ComicVineClient {
             ("offset".into(), offset.to_string()),
         ];
         if let Some(name) = name_filter {
-            params.push(("filter".into(), format!("name:{}", name)));
+            params.push(("filter".into(), format!("name:{}", sanitize_query(name))));
         }
 
         self.make_request("publishers/", params)
@@ -157,6 +214,7 @@ impl ComicVineClient {
     }
 
     pub async fn get_publisher_details(&self, publisher_id: &str) -> Option<Value> {
+        // El endpoint acepta el ID desnudo: /publisher/{id}/ (sin prefijo 4010-)
         let data = self
             .make_request(&format!("publisher/{}/", publisher_id), vec![])
             .await?;
@@ -171,7 +229,7 @@ impl ComicVineClient {
         publisher_id: Option<&str>,
     ) -> Vec<Value> {
         let filter_str = build_filter(&[
-            query.map(|q| format!("name:{}", q)),
+            query.map(|q| format!("name:{}", sanitize_query(q))),
             publisher_id.map(|p| format!("publisher:{}", p)),
         ]);
 
@@ -355,7 +413,7 @@ impl ComicVineClient {
         offset: usize,
     ) -> Vec<Value> {
         let mut params: Params = vec![
-            ("query".into(), query.to_string()),
+            ("query".into(), sanitize_query(query)),
             ("limit".into(), limit.to_string()),
             ("offset".into(), offset.to_string()),
         ];
@@ -372,6 +430,22 @@ impl ComicVineClient {
 
 // ── Utilidades ────────────────────────────────────────────────────────────────
 
+/// Codifica los caracteres no seguros para URL en el término de búsqueda del usuario.
+/// Codifica espacios como %20 pero deja intactos los separadores de filtro (: | ,).
+fn sanitize_query(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            ' ' => vec!['%', '2', '0'],
+            '%' => vec!['%', '2', '5'],
+            '#' => vec!['%', '2', '3'],
+            '&' => vec!['%', '2', '6'],
+            '+' => vec!['%', '2', 'B'],
+            '?' => vec!['%', '3', 'F'],
+            c => vec![c],
+        })
+        .collect()
+}
+
 /// Construye el string de filtros a partir de una lista de opcionales.
 fn build_filter(parts: &[Option<String>]) -> String {
     parts
@@ -384,12 +458,62 @@ fn build_filter(parts: &[Option<String>]) -> String {
 
 /// Construye los params comunes de paginación con filtro opcional.
 fn page_params(limit: usize, offset: usize, filter: &str) -> Params {
-    let mut params: Params = vec![
+    let mut params: Params = vec!(
         ("limit".into(), limit.to_string()),
         ("offset".into(), offset.to_string()),
-    ];
+    );
     if !filter.is_empty() {
         params.push(("filter".into(), filter.to_string()));
     }
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_comicvine_query_url() {
+        // Para que la URL sea funcional en tu navegador, pon tu API Key aquí.
+        let api_key = "TU_API_KEY_AQUI"; 
+        let client = ComicVineClient::new(api_key, None).unwrap();
+        
+        // Simular búsqueda de "The Amazing Spider-Man" en Marvel (ID 31)
+        let query = Some("The Amazing Spider-Man");
+        let publisher_id = Some("31");
+        
+        let filter_str = build_filter(&[
+            query.map(|q| format!("name:{}", q)),
+            publisher_id.map(|p| format!("publisher:{}", p)),
+        ]);
+        
+        let params = page_params(100, 0, &filter_str);
+        let url = client.build_url("volumes/", &params);
+        
+        println!("\n\n🔗 --- COPIA ESTA URL AL NAVEGADOR (VOLÚMENES) ---");
+        println!("{}", url);
+        println!("--------------------------------------\n");
+    }
+
+    #[test]
+    fn print_publisher_query_url() {
+        let api_key = "TU_API_KEY_AQUI"; 
+        let client = ComicVineClient::new(api_key, None).unwrap();
+        
+        // Simular búsqueda de la editorial "DC Comics"
+        let name_filter = Some("DC Comics");
+        let mut params: Params = vec![
+            ("limit".into(), "50".to_string()),
+            ("offset".into(), "0".to_string()),
+        ];
+        if let Some(name) = name_filter {
+            params.push(("filter".into(), format!("name:{}", sanitize_query(name))));
+        }
+
+        let url = client.build_url("publishers/", &params);
+        
+        println!("\n\n🔗 --- COPIA ESTA URL AL NAVEGADOR (EDITORIALES) ---");
+        println!("{}", url);
+        println!("--------------------------------------\n");
+    }
 }

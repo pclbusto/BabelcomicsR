@@ -83,28 +83,37 @@ pub fn run(pool: SqlitePool) {
                 });
             }
 
-            // Reparar thumbnails que quedaron a medias (p.ej. por cierre inesperado de GNOME)
-            let pool_thumb = pool.clone();
+            // Tareas de mantenimiento al arranque (en segundo plano)
+            let pool_boot = pool.clone();
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    let card_size = CardSize::from_db(
-                        SetupRepository::new(&pool_thumb)
-                            .get().await
-                            .map(|s| s.thumbnail_size)
-                            .unwrap_or(1),
-                    );
-                    scan_service::generate_missing_thumbnails(&pool_thumb, card_size).await
+                    let setup = SetupRepository::new(&pool_boot).get().await.unwrap_or_default();
+                    
+                    // 1. Reparar thumbnails que quedaron a medias
+                    let card_size = CardSize::from_db(setup.thumbnail_size);
+                    let thumb_res = scan_service::generate_missing_thumbnails(&pool_boot, card_size).await;
+                    
+                    // 2. Generar embeddings CLIP (solo si el usuario lo tiene activado)
+                    let clip_res = if setup.clip_al_arranque {
+                        Some(scan_service::generate_missing_clip_embeddings(&pool_boot).await)
+                    } else {
+                        None
+                    };
+                    
+                    (thumb_res, clip_res)
                 },
-                |result| match result {
-                    Ok(r) if r.covers_generated > 0 => {
-                        tracing::info!(
-                            "Thumbnails faltantes regenerados al arranque: {}",
-                            r.covers_generated
-                        );
+                |(thumb_res, clip_res)| {
+                    if let Ok(r) = thumb_res {
+                        if r.covers_generated > 0 {
+                            tracing::info!("Thumbnails faltantes regenerados al arranque: {}", r.covers_generated);
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("Error regenerando thumbnails al arranque: {e}"),
+                    if let Some(Ok((generated, _))) = clip_res {
+                        if generated > 0 {
+                            tracing::info!("Embeddings CLIP generados al arranque: {}", generated);
+                        }
+                    }
                 },
             );
         } else {
@@ -260,12 +269,14 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
     row_rate.set_adjustment(Some(&gtk::Adjustment::new(0.5, 0.1, 5.0, 0.1, 0.5, 0.0)));
     group_api.add(&row_rate);
 
-    // Cargar valores iniciales de la API
+    // Cargar valores iniciales de la API y luego conectar eventos de guardado
     {
         let pool_api = pool.clone();
+        let pool_save = pool.clone();
         let row_url = row_api_url.clone();
         let row_key = row_api_key.clone();
         let row_r = row_rate.clone();
+        
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
@@ -279,45 +290,42 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                     row_key.set_text(&key);
                 }
                 row_r.set_value(setup.intervalo_api);
+
+                // Conectar señales de guardado SOLO después de cargar los valores iniciales
+                let r_url = row_url.clone();
+                let r_key = row_key.clone();
+                let r_rate = row_r.clone();
+                let p_save = pool_save.clone();
+
+                let trigger_save = move || {
+                    let pool_task = p_save.clone();
+                    let url = r_url.text().to_string();
+                    let key = r_key.text().to_string();
+                    let interval = r_rate.value();
+
+                    run_in_background(
+                        tokio::runtime::Handle::current(),
+                        async move {
+                            let repo = SetupRepository::new(&pool_task);
+                            let mut setup = repo.get().await.unwrap_or_default();
+                            setup.api_url = Some(url);
+                            setup.api_key_encrypted = if key.is_empty() { None } else { Some(key) };
+                            setup.intervalo_api = interval;
+                            let _ = repo.save(&setup).await;
+                        },
+                        |_| {},
+                    );
+                };
+
+                let ts1 = Rc::new(trigger_save);
+                let ts2 = ts1.clone();
+                let ts3 = ts1.clone();
+
+                row_url.connect_changed(move |_| ts1());
+                row_api_key.connect_changed(move |_| ts2());
+                row_r.connect_value_notify(move |_| ts3());
             },
         );
-    }
-
-    // Guardar cambios en la API
-    {
-        let pool_save = pool.clone();
-        let row_url = row_api_url.clone();
-        let row_key = row_api_key.clone();
-        let row_r = row_rate.clone();
-
-        // Función auxiliar para disparar el guardado
-        let trigger_save = move || {
-            let pool_task = pool_save.clone();
-            let url = row_url.text().to_string();
-            let key = row_key.text().to_string();
-            let interval = row_r.value();
-
-            run_in_background(
-                tokio::runtime::Handle::current(),
-                async move {
-                    let repo = SetupRepository::new(&pool_task);
-                    let mut setup = repo.get().await.unwrap_or_default();
-                    setup.api_url = Some(url);
-                    setup.api_key_encrypted = if key.is_empty() { None } else { Some(key) };
-                    setup.intervalo_api = interval;
-                    let _ = repo.save(&setup).await;
-                },
-                |_| {},
-            );
-        };
-
-        let ts1 = Rc::new(trigger_save);
-        let ts2 = ts1.clone();
-        let ts3 = ts1.clone();
-
-        row_api_url.connect_changed(move |_| ts1());
-        row_api_key.connect_changed(move |_| ts2());
-        row_rate.connect_value_notify(move |_| ts3());
     }
 
     // Grupo: Directorios de escaneo
@@ -928,6 +936,47 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                         Err(e) => row_done.set_subtitle(&format!("❌ Error: {}", e)),
                     }
                 },
+            );
+        });
+    }
+
+    let row_clip_boot = adw::SwitchRow::builder()
+        .title("Generar embeddings CLIP al arrancar")
+        .subtitle("Analiza portadas nuevas al abrir la aplicación (CPU intensivo)")
+        .build();
+    group_covers.add(&row_clip_boot);
+
+    // Cargar valor inicial
+    {
+        let pool_ui = pool.clone();
+        let row = row_clip_boot.clone();
+        run_in_background(
+            tokio::runtime::Handle::current(),
+            async move {
+                SetupRepository::new(&pool_ui).get().await.map(|s| s.clip_al_arranque).unwrap_or(true)
+            },
+            move |val| {
+                row.set_active(val);
+            }
+        );
+    }
+
+    // Guardar cambio
+    {
+        let pool_task = pool.clone();
+        row_clip_boot.connect_active_notify(move |row| {
+            let val = row.is_active();
+            let p = pool_task.clone();
+            run_in_background(
+                tokio::runtime::Handle::current(),
+                async move {
+                    let repo = SetupRepository::new(&p);
+                    if let Ok(mut setup) = repo.get().await {
+                        setup.clip_al_arranque = val;
+                        let _ = repo.save(&setup).await;
+                    }
+                },
+                |_| {}
             );
         });
     }

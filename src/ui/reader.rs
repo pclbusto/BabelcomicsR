@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
@@ -11,48 +12,69 @@ use adw::prelude::*;
 use crate::helpers::{extraction_registry, extractor};
 use crate::ui::run_in_background;
 
-/// Genera el thumbnail escalado para la página `index`.
-/// - Reutiliza la página si ya está extraída en `pages_dir`.
-/// - Si no, extrae a `thumbnails_dir/.tmp/` y borra el original después.
-/// Así `pages/` solo contiene páginas visualizadas, no todo el cómic.
+/// Número de thumbnails que se generan en paralelo.
+/// Valor bajo a propósito: image::load_from_memory decodifica la imagen completa
+/// en RAM antes de escalar (~24-80 MB por página según resolución).
+const THUMB_CONCURRENCY: usize = 2;
+
+/// Píxeles RGB crudos de un thumbnail escalado a 160px de ancho.
+struct ThumbPixels {
+    data: Vec<u8>,
+    width: i32,
+    height: i32,
+    rowstride: i32,
+}
+
+/// Genera el thumbnail de una página y devuelve píxeles RGB crudos.
+/// Devolver píxeles directamente (sin encode JPEG) evita:
+///   - Un encode costoso en el hilo bloqueante.
+///   - Un decode costoso en el hilo principal de GTK.
+/// La imagen completa se libera explícitamente antes de devolver los píxeles.
 async fn make_thumbnail(
     comic_path: String,
     page_name: String,
-    index: usize,
     pages_dir: PathBuf,
-    thumbnails_dir: PathBuf,
-) -> anyhow::Result<PathBuf> {
-    if !thumbnails_dir.exists() {
-        std::fs::create_dir_all(&thumbnails_dir)?;
-    }
-
-    // Reutilizar si la página ya fue extraída para visualización
+) -> anyhow::Result<ThumbPixels> {
     let cached = page_path_in(&page_name, &pages_dir);
-    let (source, delete_after) = if cached.exists() {
-        (cached, false)
-    } else {
-        // Extraer a directorio temporal exclusivo; se borra tras escalar
-        let tmp_dir = thumbnails_dir.join(".tmp");
-        if !tmp_dir.exists() {
-            std::fs::create_dir_all(&tmp_dir)?;
-        }
-        let extracted = extractor::extract_single_page(&comic_path, &page_name, &tmp_dir)?;
-        (extracted, true)
-    };
 
-    let out = thumbnails_dir.join(format!("thumb_{:04}.jpg", index));
+    tokio::task::spawn_blocking(move || -> anyhow::Result<ThumbPixels> {
+        let img = if cached.exists() {
+            image::open(&cached)?
+        } else {
+            let bytes = extractor::extract_page_to_memory(&comic_path, &page_name)?;
+            let img = image::load_from_memory(&bytes)?;
+            drop(bytes); // liberar bytes comprimidos antes de escalar
+            img
+        };
 
-    // image::open es CPU-intensivo y bloqueante → spawn_blocking
-    tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
-        let img = image::open(&source)?;
         let thumb = img.resize(160, u32::MAX, image::imageops::FilterType::Triangle);
-        thumb.save_with_format(&out, image::ImageFormat::Jpeg)?;
-        if delete_after {
-            let _ = std::fs::remove_file(&source);
-        }
-        Ok(out)
+        drop(img); // liberar imagen completa (~24-80 MB) antes de convertir
+
+        let rgb = thumb.into_rgb8();
+        let width = rgb.width() as i32;
+        let height = rgb.height() as i32;
+        let rowstride = width * 3;
+        let data = rgb.into_raw();
+
+        Ok(ThumbPixels { data, width, height, rowstride })
     })
     .await?
+}
+
+/// Crea un Pixbuf desde píxeles RGB crudos (sin decode) y lo aplica al widget.
+/// Es instantáneo en el hilo principal porque no hay decodificación.
+fn apply_thumbnail(img: &gtk::Image, t: ThumbPixels) {
+    let pixbuf = Pixbuf::from_bytes(
+        &glib::Bytes::from_owned(t.data),
+        gdk_pixbuf::Colorspace::Rgb,
+        false, // sin canal alpha
+        8,     // bits por muestra
+        t.width,
+        t.height,
+        t.rowstride,
+    );
+    let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+    img.set_paintable(Some(&texture));
 }
 
 /// Calcula la ruta esperada de una página extraída en `dir`.
@@ -88,6 +110,9 @@ pub struct ReaderWindow {
     // Imágenes de la barra lateral: se actualizan conforme se generan thumbnails
     thumbnail_images: Rc<RefCell<Vec<gtk::Image>>>,
 
+    // Marca qué thumbnails ya fueron generados (para no repetir trabajo)
+    thumbnail_ready: Rc<RefCell<Vec<bool>>>,
+
     // UI
     page_entry: gtk::SpinButton,
     total_pages_label: gtk::Label,
@@ -99,8 +124,6 @@ pub struct ReaderWindow {
     fit_mode: Rc<Cell<FitMode>>,
     /// Directorio para páginas a resolución completa (display + prefetch)
     temp_dir: PathBuf,
-    /// Directorio para miniaturas escaladas (~20 KB c/u)
-    thumbnails_dir: PathBuf,
     comic_path: Rc<String>,
     updating_entry: Rc<Cell<bool>>,
 
@@ -108,7 +131,7 @@ pub struct ReaderWindow {
     extracting: Rc<Cell<bool>>,
     pending_index: Rc<Cell<Option<usize>>>,
 
-    // Se pone a false al cerrar la ventana; detiene la cadena de thumbnails
+    // Se pone a false al cerrar la ventana; detiene los workers de thumbnails
     alive: Rc<Cell<bool>>,
 
     // Smart scroll
@@ -124,7 +147,6 @@ impl ReaderWindow {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Lector".to_string());
 
-        // Nombre del comic sin extensión → carpeta oculta junto al archivo
         let comic_stem = path_buf
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -132,12 +154,9 @@ impl ReaderWindow {
         let comic_parent = path_buf
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        // /green2/comics/batman/.babelcomics/batman99/
         let base_dir = comic_parent.join(".babelcomics").join(&comic_stem);
         let temp_dir = base_dir.join("pages");
-        let thumbnails_dir = base_dir.join("thumbnails");
 
-        // Registrar antes de comenzar la extracción
         extraction_registry::register(path, &base_dir);
 
         let win = adw::ApplicationWindow::builder()
@@ -246,6 +265,7 @@ impl ReaderWindow {
             page_names: Rc::new(RefCell::new(Vec::new())),
             current_index: Rc::new(Cell::new(0)),
             thumbnail_images: Rc::new(RefCell::new(Vec::new())),
+            thumbnail_ready: Rc::new(RefCell::new(Vec::new())),
             page_entry,
             total_pages_label: total_label,
             sidebar: sidebar_view,
@@ -253,7 +273,6 @@ impl ReaderWindow {
             stack,
             fit_mode: Rc::new(Cell::new(FitMode::Width)),
             temp_dir,
-            thumbnails_dir,
             comic_path: Rc::new(path.to_string()),
             updating_entry: Rc::new(Cell::new(false)),
             extracting: Rc::new(Cell::new(false)),
@@ -265,7 +284,6 @@ impl ReaderWindow {
 
         reader.setup_logic(&btn_fullscreen, &menu_button);
 
-        // Listar páginas en background (rápido — no extrae nada)
         let r_cb = reader.clone();
         let path_task = path.to_string();
         run_in_background(
@@ -283,13 +301,14 @@ impl ReaderWindow {
     fn on_pages_listed(&self, names: Vec<String>) {
         let count = names.len();
         *self.page_names.borrow_mut() = names;
+        *self.thumbnail_ready.borrow_mut() = vec![false; count];
 
         self.page_entry.set_range(1.0, count as f64);
         self.total_pages_label.set_label(&format!("de {}", count));
 
         self.build_sidebar_placeholders(count);
         self.show_page(0);
-        self.load_next_thumbnail(0);
+        self.start_thumbnail_workers();
     }
 
     fn build_sidebar_placeholders(&self, count: usize) {
@@ -322,6 +341,58 @@ impl ReaderWindow {
         self.thumbnail_list.connect_row_activated(move |_, row| {
             r.show_page(row.index() as usize);
         });
+    }
+
+    /// Lanza `THUMB_CONCURRENCY` workers independientes, cada uno procesa su
+    /// "lane": worker 0 → páginas 0, 6, 12…; worker 1 → páginas 1, 7, 13…; etc.
+    fn start_thumbnail_workers(&self) {
+        let count = self.page_names.borrow().len();
+        let lanes = THUMB_CONCURRENCY.min(count);
+        for lane in 0..lanes {
+            self.load_thumbnail_at(lane);
+        }
+    }
+
+    /// Genera el thumbnail de `index` en background y, al terminar, continúa
+    /// con `index + THUMB_CONCURRENCY` (su siguiente turno en la misma lane).
+    fn load_thumbnail_at(&self, index: usize) {
+        if !self.alive.get() {
+            return;
+        }
+
+        let count = self.page_names.borrow().len();
+        if index >= count {
+            return;
+        }
+
+        // Si ya está listo (p.ej. al reabrir el sidebar) no repetimos trabajo
+        if self.thumbnail_ready.borrow()[index] {
+            self.load_thumbnail_at(index + THUMB_CONCURRENCY);
+            return;
+        }
+
+        let page_name = self.page_names.borrow()[index].clone();
+        let comic_path = (*self.comic_path).clone();
+        let temp_dir = self.temp_dir.clone();
+        let r = self.clone_ref();
+
+        run_in_background(
+            tokio::runtime::Handle::current(),
+            make_thumbnail(comic_path, page_name, temp_dir),
+            move |res| {
+                if !r.alive.get() {
+                    return;
+                }
+                if let Ok(pixels) = res {
+                    r.thumbnail_ready.borrow_mut()[index] = true;
+                    let images = r.thumbnail_images.borrow();
+                    if let Some(img) = images.get(index) {
+                        apply_thumbnail(img, pixels);
+                    }
+                }
+                r.load_thumbnail_at(index + THUMB_CONCURRENCY);
+            },
+        );
     }
 
     fn show_page(&self, index: usize) {
@@ -410,58 +481,6 @@ impl ReaderWindow {
         );
     }
 
-    /// Carga el thumbnail de `index` en background:
-    /// - Si ya está escalado en `thumbnails/`, lo usa directamente.
-    /// - Si la página ya fue extraída para visualización, escala desde ahí.
-    /// - Si no, extrae a `thumbnails/.tmp/`, escala, y borra el original.
-    /// Así `pages/` solo contiene las páginas visualizadas, no todas las del cómic.
-    fn load_next_thumbnail(&self, index: usize) {
-        if !self.alive.get() {
-            return;
-        }
-
-        let names = self.page_names.borrow();
-        if index >= names.len() {
-            return;
-        }
-        let page_name = names[index].clone();
-        drop(names);
-
-        // Si ya existe el thumbnail escalado, úsalo directamente sin extraer nada
-        let thumb_path = self.thumbnails_dir.join(format!("thumb_{:04}.jpg", index));
-        if thumb_path.exists() {
-            let images = self.thumbnail_images.borrow();
-            if let Some(img) = images.get(index) {
-                img.set_from_file(Some(&thumb_path));
-            }
-            drop(images);
-            self.load_next_thumbnail(index + 1);
-            return;
-        }
-
-        let comic_path = (*self.comic_path).clone();
-        let temp_dir = self.temp_dir.clone();
-        let thumbnails_dir = self.thumbnails_dir.clone();
-        let r = self.clone_ref();
-
-        run_in_background(
-            tokio::runtime::Handle::current(),
-            make_thumbnail(comic_path, page_name, index, temp_dir, thumbnails_dir),
-            move |res| {
-                if !r.alive.get() {
-                    return;
-                }
-                if let Ok(tp) = res {
-                    let images = r.thumbnail_images.borrow();
-                    if let Some(img) = images.get(index) {
-                        img.set_from_file(Some(&tp));
-                    }
-                }
-                r.load_next_thumbnail(index + 1);
-            },
-        );
-    }
-
     fn display_image(&self, path: &PathBuf) {
         self.image.set_file(Some(&gio::File::for_path(path)));
         self.apply_fit_mode();
@@ -518,9 +537,7 @@ impl ReaderWindow {
 
         self.setup_menu(btn_menu);
 
-        // Al cerrar: detener thumbnails, desregistrar y borrar el caché
         let alive_flag = self.alive.clone();
-        // base_dir es el padre de temp_dir (pages/) → .babelcomics/{hash}/
         let base_dir = self.temp_dir
             .parent()
             .unwrap_or(&self.temp_dir)
@@ -639,6 +656,7 @@ impl ReaderWindow {
             page_names: self.page_names.clone(),
             current_index: self.current_index.clone(),
             thumbnail_images: self.thumbnail_images.clone(),
+            thumbnail_ready: self.thumbnail_ready.clone(),
             page_entry: self.page_entry.clone(),
             total_pages_label: self.total_pages_label.clone(),
             sidebar: self.sidebar.clone(),
@@ -646,7 +664,6 @@ impl ReaderWindow {
             stack: self.stack.clone(),
             fit_mode: self.fit_mode.clone(),
             temp_dir: self.temp_dir.clone(),
-            thumbnails_dir: self.thumbnails_dir.clone(),
             comic_path: self.comic_path.clone(),
             updating_entry: self.updating_entry.clone(),
             extracting: self.extracting.clone(),

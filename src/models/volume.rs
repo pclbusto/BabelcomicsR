@@ -37,5 +37,6 @@ pub struct VolumeView {
     pub cantidad_poseida: i64, // Cuántos archivos tenemos
     pub id_comicbook_portada: Option<i64>, // ID del primer comic para el thumbnail
     pub path_portada: Option<String>,      // Path físico del comic de portada
+    pub image_url: String,                 // URL de la imagen en ComicVine
 }
 

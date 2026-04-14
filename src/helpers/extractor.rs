@@ -51,6 +51,18 @@ pub fn extract_single_page(comic_path: &str, page_name: &str, target_dir: &Path)
     }
 }
 
+/// Extrae una sola página directamente a memoria.
+pub fn extract_page_to_memory(comic_path: &str, page_name: &str) -> Result<Vec<u8>> {
+    let p = Path::new(comic_path);
+    match ComicFormat::from_path(p) {
+        ComicFormat::Cbz => extract_page_to_memory_zip(p, page_name),
+        ComicFormat::Cbr => extract_page_to_memory_rar(p, page_name),
+        ComicFormat::Cb7 => extract_page_to_memory_7z(p, page_name),
+        ComicFormat::Pdf => extract_page_to_memory_pdf(p, page_name),
+        ComicFormat::Unknown => bail!("Formato no soportado: {}", comic_path),
+    }
+}
+
 // --- list helpers ---
 
 fn list_pages_zip(path: &Path) -> Result<Vec<String>> {
@@ -135,6 +147,58 @@ fn list_pages_pdf(path: &Path) -> Result<Vec<String>> {
     }
 
     Ok((1..=count).map(|i| format!("{:04}", i)).collect())
+}
+
+// --- extract single memory helpers ---
+
+fn extract_page_to_memory_zip(path: &Path, page_name: &str) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let mut entry = archive.by_name(page_name)?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn extract_page_to_memory_rar(path: &Path, page_name: &str) -> Result<Vec<u8>> {
+    let output = Command::new("unrar")
+        .args(["p", "-inul", path.to_str().unwrap_or(""), page_name])
+        .output()
+        .context("No se pudo ejecutar 'unrar'")?;
+    if !output.status.success() {
+        bail!("unrar p falló extrayendo '{}' a memoria", page_name);
+    }
+    Ok(output.stdout)
+}
+
+fn extract_page_to_memory_7z(path: &Path, page_name: &str) -> Result<Vec<u8>> {
+    // 7z no soporta bien extracción a stdout de un solo archivo con la lib actual
+    // Reutilizamos la lógica de cover que usa un temporal pequeño y luego lo borra,
+    // o bien extraemos todo si es CB7 (por eficiencia de acceso posterior).
+    let tmp_dir = tempfile_dir()?;
+    let extracted = extract_page_7z(path, page_name, Path::new(&tmp_dir))?;
+    let bytes = std::fs::read(&extracted)?;
+    let _ = std::fs::remove_file(&extracted);
+    Ok(bytes)
+}
+
+fn extract_page_to_memory_pdf(path: &Path, page_name: &str) -> Result<Vec<u8>> {
+    let page_num: u32 = page_name.parse().context("Número de página PDF inválido")?;
+    let output = Command::new("pdftoppm")
+        .args([
+            "-f", &page_num.to_string(),
+            "-l", &page_num.to_string(),
+            "-jpeg",
+            "-singlefile",
+            path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .context("No se pudo ejecutar 'pdftoppm'")?;
+    
+    if !output.status.success() {
+        bail!("pdftoppm falló para página {}", page_num);
+    }
+    Ok(output.stdout)
 }
 
 // --- extract single helpers ---

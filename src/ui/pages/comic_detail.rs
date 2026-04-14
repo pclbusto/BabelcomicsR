@@ -1,5 +1,9 @@
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::path::Path;
+use std::rc::Rc;
 
+use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
@@ -7,7 +11,7 @@ use adw::prelude::*;
 use sqlx::SqlitePool;
 
 use crate::helpers::paths::comic_thumbnail_path;
-use crate::helpers::suggestion_service::SuggestionResult;
+use crate::helpers::suggestion_service::UnifiedSuggestion;
 use crate::helpers::thumbnail::CardSize;
 use crate::models::{ComicbookView, NewComicbookDetail};
 use crate::repositories::{ComicbookDetailRepository, ComicbookRepository, SetupRepository};
@@ -267,7 +271,7 @@ fn build_basic_info(comic: &ComicbookView, pool: SqlitePool) -> gtk::Box {
     // Ruta
     let path_row = adw::ActionRow::builder()
         .title("Ruta")
-        .subtitle(&comic.path)
+        .subtitle(glib::markup_escape_text(&comic.path).as_str())
         .subtitle_selectable(true)
         .build();
     file_group.add(&path_row);
@@ -275,7 +279,7 @@ fn build_basic_info(comic: &ComicbookView, pool: SqlitePool) -> gtk::Box {
     if let Some(ref err) = comic.error_ultimo_escaneo {
         let err_row = adw::ActionRow::builder()
             .title("Error de escaneo")
-            .subtitle(err)
+            .subtitle(glib::markup_escape_text(err).as_str())
             .subtitle_selectable(true)
             .build();
         file_group.add(&err_row);
@@ -393,7 +397,7 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget 
 
 fn show_suggest_dialog(
     comic_id: i64,
-    comic_path: String,
+    _comic_path: String,
     pool: SqlitePool,
     parent: Option<&gtk::Window>,
 ) {
@@ -483,7 +487,10 @@ fn show_suggest_dialog(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            crate::helpers::suggestion_service::suggest_for_comic(&pool_done, comic_id, 10).await
+            crate::helpers::suggestion_service::suggest_best_matches(
+                &pool_done, comic_id, 10,
+            )
+            .await
         },
         move |result| match result {
             Err(_) => {
@@ -493,9 +500,8 @@ fn show_suggest_dialog(
                 stack_done.set_visible_child_name("empty");
             }
             Ok(candidates) => {
-                for candidate in candidates {
-                    let row =
-                        build_candidate_row(&candidate, comic_id, pool.clone(), dialog_weak.clone());
+                for c in candidates {
+                    let row = build_suggestion_row(&c, comic_id, pool.clone(), dialog_weak.clone());
                     list_done.append(&row);
                 }
                 stack_done.set_visible_child_name("results");
@@ -504,8 +510,8 @@ fn show_suggest_dialog(
     );
 }
 
-fn build_candidate_row(
-    candidate: &SuggestionResult,
+fn build_suggestion_row(
+    candidate: &crate::helpers::suggestion_service::UnifiedSuggestion,
     comic_id: i64,
     pool: SqlitePool,
     dialog_weak: glib::WeakRef<adw::Window>,
@@ -537,45 +543,58 @@ fn build_candidate_row(
             .build(),
     );
 
-    if let Some(ruta) = candidate.ruta_cover.clone() {
+    {
         let cover_weak = cover_box.downgrade();
+        let ruta_cover = candidate.ruta_cover.clone();
+        let url_original = candidate.url_original.clone();
+        let nombre_volume = candidate.nombre_volume.clone().unwrap_or_default();
+        let id_volume = candidate.id_volume.unwrap_or(0);
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                let bytes = tokio::fs::read(&ruta).await.ok()?;
-                tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-                    let img = image::load_from_memory(&bytes).ok()?;
+                let bytes = crate::helpers::paths::read_comicbook_info_cover_bytes(
+                    ruta_cover.as_deref(),
+                    url_original.as_deref(),
+                    &nombre_volume,
+                    id_volume,
+                ).await?;
+                tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
+                    let img    = image::load_from_memory(&bytes).ok()?;
                     let scaled = img.resize(u32::MAX, 64, image::imageops::FilterType::Triangle);
-                    let mut out = Vec::new();
-                    scaled
-                        .write_to(
-                            &mut std::io::Cursor::new(&mut out),
-                            image::ImageFormat::Jpeg,
-                        )
-                        .ok()?;
-                    Some(out)
+                    drop(img);
+                    let rgb       = scaled.into_rgb8();
+                    let width     = rgb.width() as i32;
+                    let height    = rgb.height() as i32;
+                    let rowstride = width * 3;
+                    Some((rgb.into_raw(), width, height, rowstride))
                 })
                 .await
                 .ok()?
             },
-            move |bytes_opt| {
-                if let (Some(bytes), Some(container)) = (bytes_opt, cover_weak.upgrade()) {
-                    let gbytes = glib::Bytes::from_owned(bytes);
-                    if let Ok(texture) = gtk::gdk::Texture::from_bytes(&gbytes) {
-                        while let Some(child) = container.first_child() {
-                            container.remove(&child);
-                        }
-                        let pic = gtk::Picture::for_paintable(&texture);
-                        pic.set_content_fit(gtk::ContentFit::Contain);
-                        container.append(&pic);
+            move |pixels_opt| {
+                if let (Some((data, width, height, rowstride)), Some(container)) =
+                    (pixels_opt, cover_weak.upgrade())
+                {
+                    let pixbuf = Pixbuf::from_bytes(
+                        &glib::Bytes::from_owned(data),
+                        gdk_pixbuf::Colorspace::Rgb,
+                        false, 8, width, height, rowstride,
+                    );
+                    while let Some(child) = container.first_child() {
+                        container.remove(&child);
                     }
+                    let pic = gtk::Picture::new();
+                    let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                    pic.set_paintable(Some(&texture));
+                    pic.set_content_fit(gtk::ContentFit::Contain);
+                    container.append(&pic);
                 }
             },
         );
     }
     row_box.append(&cover_box);
 
-    // Info de la serie / número
+    // Info
     let info_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(3)
@@ -612,7 +631,7 @@ fn build_candidate_row(
 
     info_box.append(
         &gtk::Label::builder()
-            .label(&similarity_label(candidate.distance))
+            .label(&suggestion_similarity_label(candidate.similarity, candidate.method))
             .halign(gtk::Align::Start)
             .css_classes(["caption", "dim-label"])
             .build(),
@@ -643,26 +662,46 @@ fn build_candidate_row(
     gtk::ListBoxRow::builder().child(&row_box).build()
 }
 
-fn similarity_label(distance: u32) -> String {
-    match distance {
-        0..=5 => "Coincidencia exacta".to_string(),
-        6..=15 => "Muy similar".to_string(),
-        16..=25 => "Similar".to_string(),
-        26..=35 => "Posible coincidencia".to_string(),
-        _ => format!("Similitud baja (distancia {})", distance),
+fn suggestion_similarity_label(similarity: f32, method: crate::helpers::suggestion_service::SuggestionMethod) -> String {
+    let pct = (similarity * 100.0).round() as i32;
+    let prefix = match method {
+        crate::helpers::suggestion_service::SuggestionMethod::Clip => "CLIP · ",
+        crate::helpers::suggestion_service::SuggestionMethod::Hash => "Hash · ",
+    };
+
+    if similarity >= 0.95 {
+        format!("{}Coincidencia exacta ({}%)", prefix, pct)
+    } else if similarity >= 0.85 {
+        format!("{}Muy similar ({}%)", prefix, pct)
+    } else if similarity >= 0.75 {
+        format!("{}Similar ({}%)", prefix, pct)
+    } else if similarity >= 0.65 {
+        format!("{}Posible coincidencia ({}%)", prefix, pct)
+    } else {
+        format!("{}Similitud baja ({}%)", prefix, pct)
     }
 }
 
 fn add_row(group: &adw::PreferencesGroup, title: &str, subtitle: &str) {
     let row = adw::ActionRow::builder()
-        .title(title)
-        .subtitle(subtitle)
+        .title(glib::markup_escape_text(title).as_str())
+        .subtitle(glib::markup_escape_text(subtitle).as_str())
         .subtitle_selectable(true)
         .build();
     group.add(&row);
 }
 
 // ── Pestaña Páginas ───────────────────────────────────────────────────────────
+
+const DETAIL_THUMB_CONCURRENCY: usize = 6;
+
+/// Ítem de trabajo para el cargador de thumbnails de la pestaña Páginas.
+struct PageThumbJob {
+    comic_path: String,
+    page_name: String,
+    ch: u32,
+    container: glib::WeakRef<gtk::Box>,
+}
 
 fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
     let stack = gtk::Stack::builder()
@@ -690,11 +729,17 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
         .child_spacing(12)
         .line_spacing(12)
         .build();
-    
+
     scroll.set_child(Some(&wrap_box));
     stack.add_named(&scroll, Some("content"));
-
     stack.set_visible_child_name("loading");
+
+    // Flag compartido: se pone a false al destruir el widget, detiene todos los workers.
+    let alive: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+    let alive_destroy = alive.clone();
+    stack.connect_destroy(move |_| {
+        alive_destroy.set(false);
+    });
 
     let stack_done = stack.clone();
     let wrap_done = wrap_box.clone();
@@ -709,59 +754,68 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
                 SetupRepository::new(&pool_task).get().await.unwrap_or_default().thumbnail_size
             );
 
-            // Extraer páginas al directorio temporal
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            use std::hash::{Hash, Hasher};
-            comic.path.hash(&mut hasher);
-            let temp_dir = std::env::temp_dir()
-                .join(format!("babelcomics_detail_{:x}", hasher.finish()));
-
-            let pages = crate::helpers::extractor::extract_all_pages(&comic.path, &temp_dir).ok()?;
+            // Listar páginas sin extraer nada
+            let page_names = crate::helpers::extractor::list_pages(&comic.path).ok()?;
 
             // Poblar comicbooks_detail si aún no tiene entradas para este comic
             let detail_repo = ComicbookDetailRepository::new(&pool_task);
             let existing = detail_repo.get_by_comicbook(comic_id).await.unwrap_or_default();
             if existing.is_empty() {
-                let page_names = crate::helpers::extractor::list_pages(&comic.path).unwrap_or_default();
                 let new_pages: Vec<NewComicbookDetail> = page_names
-                    .into_iter()
+                    .iter()
                     .enumerate()
                     .map(|(i, name)| NewComicbookDetail {
                         comicbook_id:  comic_id,
                         indice_pagina: i as i64,
                         orden_pagina:  i as i64,
                         tipo_pagina:   crate::models::TipoPagina::Story,
-                        nombre_pagina: Some(name),
+                        nombre_pagina: Some(name.clone()),
                     })
                     .collect();
                 let _ = detail_repo.upsert_all(&new_pages).await;
             }
 
-            // Índice de la página marcada como FrontCover (si existe)
             let cover_indice = detail_repo
                 .get_by_comicbook(comic_id).await.unwrap_or_default()
                 .into_iter()
                 .find(|p| p.tipo_pagina == crate::models::TipoPagina::FrontCover.to_db())
                 .map(|p| p.indice_pagina);
 
-            Some((pages, temp_dir, card_size, cover_indice))
+            Some((comic.path, page_names, card_size, cover_indice))
         },
         move |res| {
-            if let Some((pages, _temp_dir, card_size, cover_indice)) = res {
-                use std::rc::Rc;
-                use std::cell::RefCell;
-                // Botones de cover compartidos entre todas las cards para poder actualizarlos
-                let cover_btns: Rc<RefCell<Vec<(i64, gtk::Button)>>> =
-                    Rc::new(RefCell::new(Vec::new()));
+            if let Some((comic_path, page_names, card_size, cover_indice)) = res {
+                let cover_btns: Rc<std::cell::RefCell<Vec<(i64, gtk::Button)>>> =
+                    Rc::new(std::cell::RefCell::new(Vec::new()));
 
-                for (i, path) in pages.into_iter().enumerate() {
+                // Cola de trabajos de thumbnail: se llena aquí, se drena con concurrencia limitada
+                let jobs: Rc<std::cell::RefCell<VecDeque<PageThumbJob>>> =
+                    Rc::new(std::cell::RefCell::new(VecDeque::new()));
+
+                let (_, ch) = card_size.dims();
+
+                for (i, page_name) in page_names.into_iter().enumerate() {
                     let is_cover = cover_indice.map_or(i == 0, |ci| ci == i as i64);
-                    let (card, btn) = build_page_card(
-                        i, path, card_size, comic_id, pool.clone(), is_cover, cover_btns.clone(),
+                    let (card, btn, container_weak) = build_page_card(
+                        i, &page_name, card_size, comic_id, pool.clone(), is_cover,
+                        cover_btns.clone(),
                     );
                     cover_btns.borrow_mut().push((i as i64, btn));
                     wrap_done.append(&card);
+
+                    jobs.borrow_mut().push_back(PageThumbJob {
+                        comic_path: comic_path.clone(),
+                        page_name,
+                        ch,
+                        container: container_weak,
+                    });
                 }
+
+                // Arrancar N workers concurrentes que drenan la cola
+                for _ in 0..DETAIL_THUMB_CONCURRENCY {
+                    drain_page_thumb_queue(jobs.clone(), alive.clone());
+                }
+
                 stack_done.set_visible_child_name("content");
             }
         },
@@ -770,15 +824,79 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
     stack.upcast()
 }
 
+/// Toma el siguiente trabajo de la cola, genera el thumbnail y se llama a sí mismo al terminar.
+/// Si `alive` es false (solapa cerrada), para inmediatamente.
+fn drain_page_thumb_queue(
+    queue: Rc<std::cell::RefCell<VecDeque<PageThumbJob>>>,
+    alive: Rc<Cell<bool>>,
+) {
+    if !alive.get() {
+        return;
+    }
+
+    let job = queue.borrow_mut().pop_front();
+    let Some(job) = job else { return };
+
+    let comic_path = job.comic_path;
+    let page_name  = job.page_name;
+    let ch         = job.ch;
+    let container  = job.container;
+
+    run_in_background(
+        tokio::runtime::Handle::current(),
+        async move {
+            tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
+                let bytes = crate::helpers::extractor::extract_page_to_memory(&comic_path, &page_name).ok()?;
+                let img   = image::load_from_memory(&bytes).ok()?;
+                drop(bytes);
+                let scaled = img.resize(u32::MAX, ch, image::imageops::FilterType::Triangle);
+                drop(img);
+                let rgb       = scaled.into_rgb8();
+                let width     = rgb.width() as i32;
+                let height    = rgb.height() as i32;
+                let rowstride = width * 3;
+                Some((rgb.into_raw(), width, height, rowstride))
+            })
+            .await
+            .ok()?
+        },
+        move |pixels_opt| {
+            if alive.get() {
+                if let (Some((data, width, height, rowstride)), Some(container)) =
+                    (pixels_opt, container.upgrade())
+                {
+                    let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
+                        &glib::Bytes::from_owned(data),
+                        gdk_pixbuf::Colorspace::Rgb,
+                        false, 8, width, height, rowstride,
+                    );
+                    while let Some(child) = container.first_child() {
+                        container.remove(&child);
+                    }
+                    let picture = gtk::Picture::new();
+                    let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                    picture.set_paintable(Some(&texture));
+                    picture.set_content_fit(gtk::ContentFit::Contain);
+                    picture.add_css_class("cover-image");
+                    container.append(&picture);
+                }
+                drain_page_thumb_queue(queue, alive);
+            }
+        },
+    );
+}
+
+/// Construye la card de una página con placeholder. No lanza ninguna tarea de fondo.
+/// Devuelve el widget, el botón de portada y el contenedor de imagen (para rellenar después).
 fn build_page_card(
     index: usize,
-    path: std::path::PathBuf,
+    page_name: &str,
     card_size: CardSize,
     comicbook_id: i64,
     pool: SqlitePool,
     is_cover: bool,
     cover_btns: std::rc::Rc<std::cell::RefCell<Vec<(i64, gtk::Button)>>>,
-) -> (gtk::Widget, gtk::Button) {
+) -> (gtk::Widget, gtk::Button, glib::WeakRef<gtk::Box>) {
     let (cw, ch) = card_size.dims();
 
     let card = gtk::Box::builder()
@@ -822,12 +940,11 @@ fn build_page_card(
         .build();
 
     let pool_btn = pool.clone();
-    let page_path = path.clone();
+    let page_name_btn = page_name.to_string();
     let cover_btns_click = cover_btns.clone();
     btn_cover.connect_clicked(move |_| {
         let indice = index as i64;
 
-        // Actualizar iconos de todos los botones en el hilo GTK
         for (idx, btn) in cover_btns_click.borrow().iter() {
             btn.set_icon_name(if *idx == indice {
                 "starred-symbolic"
@@ -836,19 +953,37 @@ fn build_page_card(
             });
         }
 
-        // Persistir en BD y regenerar thumbnail en background
         let pool_c = pool_btn.clone();
-        let path_c = page_path.clone();
+        let name_c = page_name_btn.clone();
         tokio::runtime::Handle::current().spawn(async move {
             let _ = ComicbookDetailRepository::new(&pool_c)
                 .set_as_cover(comicbook_id, indice)
                 .await;
 
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(bytes) = std::fs::read(&path_c) {
-                    let _ = crate::helpers::thumbnail::generate_all_thumbnails(&bytes, comicbook_id);
+            // Regenerar thumbnail de portada a partir del nombre de página
+            let comic_opt = ComicbookRepository::new(&pool_c)
+                .get_view_by_id(comicbook_id).await.ok().flatten();
+            if let Some(comic) = comic_opt {
+                let clip_blob = tokio::task::spawn_blocking(move || {
+                    let bytes = crate::helpers::extractor::extract_page_to_memory(
+                        &comic.path, &name_c,
+                    )?;
+                    crate::helpers::thumbnail::generate_all_thumbnails(&bytes, comicbook_id)?;
+                    // Recalcular CLIP embedding con la nueva portada
+                    let emb = crate::helpers::clip_embedder::embed_image(&bytes)?;
+                    Ok::<Vec<u8>, anyhow::Error>(crate::helpers::clip_embedder::to_bytes(&emb))
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+
+                // Guardar nuevo embedding en BD (invalida el caché anterior)
+                if let Some(blob) = clip_blob {
+                    let _ = ComicbookRepository::new(&pool_c)
+                        .set_clip_embedding(comicbook_id, &blob)
+                        .await;
                 }
-            }).await;
+            }
         });
     });
 
@@ -870,36 +1005,5 @@ fn build_page_card(
     card.append(&lbl);
 
     let container_weak = image_container.downgrade();
-    run_in_background(
-        tokio::runtime::Handle::current(),
-        async move {
-            let bytes = tokio::fs::read(&path).await.ok()?;
-            tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-                let img = image::load_from_memory(&bytes).ok()?;
-                let scaled = img.resize(u32::MAX, ch, image::imageops::FilterType::Triangle);
-                let mut out = Vec::new();
-                scaled.write_to(
-                    &mut std::io::Cursor::new(&mut out),
-                    image::ImageFormat::Jpeg,
-                ).ok()?;
-                Some(out)
-            }).await.ok()?
-        },
-        move |bytes_opt| {
-            if let (Some(bytes), Some(container)) = (bytes_opt, container_weak.upgrade()) {
-                let gbytes = glib::Bytes::from_owned(bytes);
-                if let Ok(texture) = gtk::gdk::Texture::from_bytes(&gbytes) {
-                    while let Some(child) = container.first_child() {
-                        container.remove(&child);
-                    }
-                    let picture = gtk::Picture::for_paintable(&texture);
-                    picture.set_content_fit(gtk::ContentFit::Contain);
-                    picture.add_css_class("cover-image");
-                    container.append(&picture);
-                }
-            }
-        },
-    );
-
-    (card.upcast(), btn_cover)
+    (card.upcast(), btn_cover, container_weak)
 }

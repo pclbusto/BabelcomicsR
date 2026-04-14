@@ -32,18 +32,20 @@ pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
     // --- Secciones ---
     let comics_box = build_stats_list();
     let total_c = create_stat_row("Total Comics", "0", "image-x-generic-symbolic");
-    let cat_c = create_stat_row("Catalogados", "0", "emblem-ok-symbolic");
-    let uncat_c = create_stat_row("Sin catalogar", "0", "dialog-question-symbolic");
+    let cat_c = create_stat_row("Catalogados", "0", "view-reveal-symbolic");
+    let uncat_c = create_stat_row("Sin catalogar", "0", "view-conceal-symbolic");
     let err_c = create_stat_row("Con errores", "0", "dialog-warning-symbolic");
     err_c.add_css_class("error");
+    let nothumb_c = create_stat_row("Sin thumbnail", "0", "image-missing-symbolic");
     comics_box.append(&total_c);
     comics_box.append(&cat_c);
     comics_box.append(&uncat_c);
     comics_box.append(&err_c);
+    comics_box.append(&nothumb_c);
     stack.add_titled(&comics_box, Some("comics"), "Comics");
 
     let volumes_box = build_stats_list();
-    let total_v = create_stat_row("Total Series", "0", "open-book-symbolic");
+    let total_v = create_stat_row("Total Series", "0", "image-x-generic-symbolic");
     let comp_v = create_stat_row("Completadas", "0", "emblem-favorite-symbolic");
     volumes_box.append(&total_v);
     volumes_box.append(&comp_v);
@@ -58,10 +60,12 @@ pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
 
     // Carga de datos inicial y cada vez que el popover se hace visible
     let p = pool.clone();
-    let rows = (total_c.clone(), cat_c.clone(), uncat_c.clone(), err_c.clone(), total_v.clone(), comp_v.clone(), total_p.clone());
-    
-    let update_stats = move |p_pool: SqlitePool, p_rows: (adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow)| {
-        let (tc_row, cc_row, uc_row, ec_row, tv_row, cv_row, tp_row) = p_rows;
+    let rows = (total_c.clone(), cat_c.clone(), uncat_c.clone(), err_c.clone(), nothumb_c.clone(), total_v.clone(), comp_v.clone(), total_p.clone());
+
+    type StatRows = (adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow);
+
+    let update_stats = move |p_pool: SqlitePool, p_rows: StatRows| {
+        let (tc_row, cc_row, uc_row, ec_row, nt_row, tv_row, cv_row, tp_row) = p_rows;
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
@@ -69,20 +73,22 @@ pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
                 let repo_v = VolumeRepository::new(&p_pool);
                 let repo_p = PublisherRepository::new(&p_pool);
 
-                let t_c = repo_c.count().await.unwrap_or(0);
-                let u_c = repo_c.count_uncatalogued().await.unwrap_or(0);
-                let e_c = repo_c.count_with_errors().await.unwrap_or(0);
-                let t_v = repo_v.count().await.unwrap_or(0);
-                let c_v = repo_v.count_completed().await.unwrap_or(0);
-                let t_p = repo_p.count().await.unwrap_or(0);
+                let t_c  = repo_c.count().await.unwrap_or(0);
+                let u_c  = repo_c.count_uncatalogued().await.unwrap_or(0);
+                let e_c  = repo_c.count_with_errors().await.unwrap_or(0);
+                let nt_c = repo_c.count_without_thumbnail().await.unwrap_or(0);
+                let t_v  = repo_v.count().await.unwrap_or(0);
+                let c_v  = repo_v.count_completed().await.unwrap_or(0);
+                let t_p  = repo_p.count().await.unwrap_or(0);
 
-                (t_c, t_c - u_c, u_c, e_c, t_v, c_v, t_p)
+                (t_c, t_c - u_c, u_c, e_c, nt_c, t_v, c_v, t_p)
             },
-            move |(tc, cc, uc, ec, tv, cv, tp)| {
+            move |(tc, cc, uc, ec, nt, tv, cv, tp)| {
                 tc_row.set_subtitle(&tc.to_string());
                 cc_row.set_subtitle(&cc.to_string());
                 uc_row.set_subtitle(&uc.to_string());
                 ec_row.set_subtitle(&ec.to_string());
+                nt_row.set_subtitle(&nt.to_string());
                 tv_row.set_subtitle(&tv.to_string());
                 cv_row.set_subtitle(&cv.to_string());
                 tp_row.set_subtitle(&tp.to_string());

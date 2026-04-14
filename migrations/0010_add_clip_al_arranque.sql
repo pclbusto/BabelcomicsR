@@ -1,0 +1,2 @@
+-- Añadir columna para controlar si se generan embeddings CLIP al arrancar
+-- ALTER TABLE setups ADD COLUMN clip_al_arranque BOOLEAN NOT NULL DEFAULT 1;

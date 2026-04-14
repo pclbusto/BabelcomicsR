@@ -1,11 +1,5 @@
-mod app;
-mod db;
-mod helpers;
-mod models;
-mod repositories;
-mod ui;
-
 use anyhow::Result;
+use babelcomics::{db, helpers, repositories, app};
 
 #[tokio::main]
 async fn main() -> Result<()> {

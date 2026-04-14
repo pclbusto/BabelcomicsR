@@ -7,5 +7,7 @@ pub mod extraction_registry;
 pub mod organizer;
 pub mod comicvine_client;
 pub mod cover_hash;
+pub mod clip_embedder;
 pub mod suggestion_service;
 pub mod download_manager;
+pub mod publisher_import_service;

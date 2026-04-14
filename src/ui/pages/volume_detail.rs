@@ -7,6 +7,7 @@ use libadwaita as adw;
 use adw::prelude::*;
 use sqlx::SqlitePool;
 
+use crate::helpers::download_manager::DownloadManager;
 use crate::models::{Volume, ComicbookInfoView};
 use crate::repositories::{VolumeRepository, ComicbookInfoRepository, PublisherRepository};
 use crate::ui::run_in_background;
@@ -45,7 +46,7 @@ pub fn build(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
             info_page.set_icon(Some(&gio::ThemedIcon::new("info-outline-symbolic")));
 
             // Pestaña: Issues
-            let issues_content = build_issues_tab(volume_id, &name, pool_v2);
+            let issues_content = build_issues_tab(volume_id, &name, pool_v2, tab_view_v.clone());
             let issues_page = tab_view_v.append(&issues_content);
             issues_page.set_title("Issues");
             issues_page.set_icon(Some(&gio::ThemedIcon::new("view-list-symbolic")));
@@ -101,7 +102,7 @@ fn build_info_tab(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
         },
         move |res| {
             if let Some((vol, publ, owned, total, percent, first_issue_cover)) = res {
-                let content = build_info_content(&vol, publ.as_ref(), owned, total, percent, first_issue_cover);
+                let content = build_info_content(&vol, publ.as_ref(), owned, total, percent, first_issue_cover, pool.clone());
                 scroll_done.set_child(Some(&content));
                 stack_done.set_visible_child_name("content");
             } else {
@@ -119,7 +120,8 @@ fn build_info_content(
     owned: usize,
     total: i64,
     percent: f64,
-    first_issue_cover: Option<String>
+    first_issue_cover: Option<String>,
+    pool: SqlitePool,
 ) -> gtk::Widget {
     let main_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -142,9 +144,30 @@ fn build_info_content(
     
     let volume_thumb = crate::helpers::paths::volume_thumbnail_path(vol.id_volume);
     if volume_thumb.exists() {
-        cover.set_filename(Some(volume_thumb));
+        cover.set_filename(Some(&volume_thumb));
     } else if let Some(path) = first_issue_cover {
         cover.set_filename(Some(std::path::PathBuf::from(path)));
+    } else if !vol.image_url.is_empty() {
+        // Fallback: descargar desde URL
+        let cover_clone = cover.clone();
+        let url = vol.image_url.clone();
+        let vt_path = volume_thumb.clone();
+        run_in_background(tokio::runtime::Handle::current(), async move {
+            if let Ok(resp) = reqwest::get(url).await {
+                if let Ok(bytes) = resp.bytes().await {
+                    if let Some(parent) = vt_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&vt_path, &bytes);
+                    return Some(vt_path);
+                }
+            }
+            None
+        }, move |path_opt| {
+            if let Some(path) = path_opt {
+                cover_clone.set_filename(Some(path));
+            }
+        });
     }
     
     header.append(&cover);
@@ -218,12 +241,139 @@ fn build_info_content(
         main_box.append(&deck_group);
     }
 
+    // --- Herramientas ---
+    {
+        let tools_group = adw::PreferencesGroup::builder().title("Herramientas").build();
+
+        // ── Actualizar desde ComicVine ──────────────────────────────────────────
+        let update_row = adw::ActionRow::builder()
+            .title("Actualizar desde ComicVine")
+            .subtitle("Descarga issues y portadas usando el ID de ComicVine")
+            .build();
+
+        let update_btn = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .tooltip_text("Sincronizar volumen con ComicVine")
+            .build();
+
+        // Desactivar el botón si el volumen no tiene ID de ComicVine
+        let cv_id_opt = vol.id_comicvine;
+        if cv_id_opt.is_none() {
+            update_btn.set_sensitive(false);
+            update_row.set_subtitle("Sin ID de ComicVine asignado");
+        }
+
+        {
+            let pool_u = pool.clone();
+            let vol_nombre = vol.nombre.clone();
+            let vol_cantidad = vol.cantidad_numeros;
+
+            update_btn.connect_clicked(move |btn| {
+                let cv_id = match cv_id_opt {
+                    Some(id) => id,
+                    None => return,
+                };
+
+                let dialog = adw::AlertDialog::builder()
+                    .heading("Actualizar volumen")
+                    .body(format!(
+                        "Se sincronizará «{}» con ComicVine.\n¿Descargar también las portadas de los issues?",
+                        vol_nombre
+                    ))
+                    .build();
+                dialog.add_response("cancel", "Cancelar");
+                dialog.add_response("meta", "Solo metadatos");
+                dialog.add_response("covers", "Con portadas");
+                dialog.set_default_response(Some("meta"));
+                dialog.set_close_response("cancel");
+                dialog.set_response_appearance("covers", adw::ResponseAppearance::Suggested);
+
+                let pool_d = pool_u.clone();
+                let nombre = vol_nombre.clone();
+                let parent_widget = btn.root();
+
+                dialog.connect_response(None, move |_d, response| {
+                    if response == "cancel" { return; }
+                    let download_covers = response == "covers";
+
+                    // Construimos el Value mínimo que necesita add_download:
+                    // id, name y count_of_issues
+                    let vol_json = serde_json::json!({
+                        "id": cv_id,
+                        "name": nombre,
+                        "count_of_issues": vol_cantidad,
+                    });
+
+                    let dm = DownloadManager::get_instance(pool_d.clone());
+                    dm.add_download(vol_json, download_covers);
+                });
+
+                dialog.present(parent_widget.as_ref());
+            });
+        }
+
+        update_row.add_suffix(&update_btn);
+        tools_group.add(&update_row);
+
+        // ── Embeddings CLIP ────────────────────────────────────────────────────
+        let clip_row = adw::ActionRow::builder()
+            .title("Generar embeddings CLIP")
+            .subtitle("Indexa las portadas de este volumen para búsqueda visual")
+            .activatable(true)
+            .build();
+
+        let clip_btn = gtk::Button::builder()
+            .icon_name("media-playback-start-symbolic")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .tooltip_text("Generar embeddings CLIP para este volumen")
+            .build();
+
+        let volume_id = vol.id_volume;
+        clip_btn.connect_clicked(move |btn| {
+            let dialog = adw::AlertDialog::builder()
+                .heading("Generar embeddings CLIP")
+                .body("¿Qué portadas de este volumen quieres indexar?")
+                .build();
+            dialog.add_response("cancel", "Cancelar");
+            dialog.add_response("missing", "Solo faltantes");
+            dialog.add_response("all", "Reindexar todo");
+            dialog.set_default_response(Some("missing"));
+            dialog.set_close_response("cancel");
+            dialog.set_response_appearance("all", adw::ResponseAppearance::Destructive);
+
+            let pool_d = pool.clone();
+            let parent_widget = btn.root();
+            let overlay_weak = btn.root()
+                .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok())
+                .and_then(|w| w.content())
+                .and_then(|w| w.downcast::<adw::ToastOverlay>().ok())
+                .map(|o| o.downgrade());
+
+            dialog.connect_response(None, move |_d, response| {
+                if response == "cancel" { return; }
+                let solo_faltantes = response != "all";
+                crate::ui::window::run_clip_generation(
+                    Some(volume_id), solo_faltantes, pool_d.clone(), overlay_weak.clone(),
+                );
+            });
+
+            dialog.present(parent_widget.as_ref());
+        });
+
+        clip_row.add_suffix(&clip_btn);
+        tools_group.add(&clip_row);
+        main_box.append(&tools_group);
+    }
+
     main_box.upcast()
 }
 
 // ── Pestaña Issues ─────────────────────────────────────────────────────────────
 
-fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool) -> gtk::Widget {
+fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     let main_vbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(0)
@@ -302,6 +452,8 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool) -> gtk:
             let solo     = poseidos.get();
             let cur_off  = offset.get();
             let v_name_t = v_name.clone();
+            let tv_outer = tab_view.clone();
+            let pool_outer = pool.clone();
 
             run_in_background(
                 tokio::runtime::Handle::current(),
@@ -325,11 +477,13 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool) -> gtk:
                     let idx    = Rc::new(Cell::new(0usize));
                     const BATCH: usize = 20;
 
+                    let tab_view_t = tv_outer.clone();
+                    let pool_t2 = pool_outer.clone();
                     glib::idle_add_local(move || {
                         let start = idx.get();
                         let end   = (start + BATCH).min(issues.len());
                         for issue in &issues[start..end] {
-                            wb.append(&build_issue_card(issue, &v_name_t, card_size));
+                            wb.append(&build_issue_card(issue, &v_name_t, card_size, tab_view_t.clone(), pool_t2.clone()));
                         }
                         idx.set(end);
                         if end >= issues.len() {
@@ -357,7 +511,7 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool) -> gtk:
             offset.set(0);
             loading.set(false);
             all_loaded.set(false);
-            loader();
+            loader.clone()();
         }
     };
     let reset = Rc::new(reset);
@@ -393,18 +547,24 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool) -> gtk:
         adj.connect_value_changed(move |adj| {
             if loading_s.get() || all_done_s.get() { return; }
             if adj.value() + adj.page_size() >= adj.upper() - 400.0 {
-                loader_s();
+                loader_s.clone()();
             }
         });
     }
 
     // Carga inicial
-    loader();
+    loader.clone()();
 
     main_vbox.upcast()
 }
 
-fn build_issue_card(view: &ComicbookInfoView, volume_name: &str, card_size: crate::helpers::thumbnail::CardSize) -> gtk::Widget {
+fn build_issue_card(
+    view: &ComicbookInfoView,
+    volume_name: &str,
+    card_size: crate::helpers::thumbnail::CardSize,
+    tab_view: adw::TabView,
+    pool: SqlitePool,
+) -> gtk::Widget {
     let (cw, ch) = card_size.dims();
 
     let card = gtk::Box::builder()
@@ -416,6 +576,21 @@ fn build_issue_card(view: &ComicbookInfoView, volume_name: &str, card_size: crat
         .hexpand(false)
         .css_classes(["card"])
         .build();
+
+    // Evento de doble clic para abrir detalle
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(1); // Botón izquierdo
+    let id_info = view.info.id_comicbook_info;
+    let tv = tab_view.clone();
+    let pool_click = pool.clone();
+    gesture.connect_pressed(move |g, n_press, _, _| {
+        if n_press == 2 {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            let new_page = crate::ui::window::add_tab(&tv, crate::ui::window::TabKind::IssueDetail(id_info, pool_click.clone()));
+            tv.set_selected_page(&new_page);
+        }
+    });
+    card.add_controller(gesture);
 
     // Si no lo tenemos físico, aplicamos efecto visual
     if view.physical_count == 0 {
@@ -503,20 +678,12 @@ fn build_issue_card(view: &ComicbookInfoView, volume_name: &str, card_size: crat
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            // 1. Prioridad: Portada descargada (ComicVine)
-            let raw = if let Some(path) = ruta_cover {
-                tokio::fs::read(&path).await.ok()
-            } else if let Some(url) = url_original {
-                let filename = url.split('/').last().unwrap_or("");
-                if !filename.is_empty() {
-                    let thumb = crate::helpers::paths::comicbook_info_thumbnail_path(&volume_name_owned, id_vol, filename);
-                    tokio::fs::read(&thumb).await.ok()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let raw = crate::helpers::paths::read_comicbook_info_cover_bytes(
+                ruta_cover.as_deref(),
+                url_original.as_deref(),
+                &volume_name_owned,
+                id_vol,
+            ).await;
 
             // Escalar a la altura del card_size para que el WrapBox calcule bien el ancho
             let raw = raw?;
