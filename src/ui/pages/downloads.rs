@@ -8,7 +8,7 @@ use gtk4::{self as gtk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::download_manager::{DownloadManager, DownloadStatus};
+use babelcomics_core::helpers::download_manager::{DownloadManager, DownloadStatus};
 
 struct DownloadRow {
     row: adw::ActionRow,

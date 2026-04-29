@@ -17,7 +17,7 @@ pub(crate) struct ClipProgressStats {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ClipGenerationEvent {
-    Progress(crate::helpers::scan_service::ClipGenerationProgress),
+    Progress(babelcomics_core::helpers::scan_service::ClipGenerationProgress),
     Finished {
         result: Result<(u32, Vec<String>), String>,
         stats: ClipProgressStats,
@@ -164,10 +164,10 @@ fn setup_download_covers_action(
             async move {
                 // 1. Enlazar en BD las portadas que ya están en disco
                 let link_result =
-                    crate::helpers::scan_service::relink_covers_from_disk(&pool_task).await;
+                    babelcomics_core::helpers::scan_service::relink_covers_from_disk(&pool_task).await;
                 // 2. Generar embeddings CLIP para todas las que tienen ruta_local
                 let clip_result =
-                    crate::helpers::scan_service::generate_missing_clip_embeddings(&pool_task)
+                    babelcomics_core::helpers::scan_service::generate_missing_clip_embeddings(&pool_task)
                         .await;
                 (link_result, clip_result)
             },
@@ -287,7 +287,7 @@ pub(crate) fn run_clip_generation(
     crate::ui::run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            let info_repo = crate::repositories::ComicbookInfoRepository::new(&pool);
+            let info_repo = babelcomics_core::repositories::ComicbookInfoRepository::new(&pool);
             let stats = info_repo
                 .count_clip_index_stats(volume_id)
                 .await
@@ -302,7 +302,7 @@ pub(crate) fn run_clip_generation(
             let progress_tx = event_tx_for_task.as_ref().map(|tx| {
                 let ui_tx = tx.clone();
                 let (progress_tx, progress_rx) = std::sync::mpsc::channel::<
-                    crate::helpers::scan_service::ClipGenerationProgress,
+                    babelcomics_core::helpers::scan_service::ClipGenerationProgress,
                 >();
                 std::thread::spawn(move || {
                     while let Ok(progress) = progress_rx.recv() {
@@ -311,7 +311,7 @@ pub(crate) fn run_clip_generation(
                 });
                 progress_tx
             });
-            let result = crate::helpers::scan_service::generate_clip_embeddings(
+            let result = babelcomics_core::helpers::scan_service::generate_clip_embeddings(
                 &pool,
                 volume_id,
                 solo_faltantes,

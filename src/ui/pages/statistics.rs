@@ -4,7 +4,7 @@ use gtk4::{self as gtk};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::repositories::{ComicbookRepository, PublisherRepository, VolumeRepository};
+use babelcomics_core::repositories::{ComicbookRepository, PublisherRepository, VolumeRepository};
 use crate::ui::run_in_background;
 
 pub fn build_popover(pool: SqlitePool) -> gtk::Popover {

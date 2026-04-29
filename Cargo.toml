@@ -1,3 +1,7 @@
+[workspace]
+members = ["core"]
+resolver = "2"
+
 [package]
 name = "babelcomics"
 version = "0.1.0"
@@ -5,51 +9,30 @@ edition = "2024"
 default-run = "babelcomics"
 
 [dependencies]
+babelcomics-core = { path = "core" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Database (SqlitePool type + sqlx::migrate! en migrador.rs)
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Crypto (API key encryption)
-aes-gcm = "0.10"
-base64 = "0.22"
-rand = "0.8"
-
-# Date/time
-chrono = { version = "0.4", features = ["serde"] }
-
-# Fase 2 - Scanner / Extractor / Thumbnails
-walkdir = "2"
-zip = "2"
-sevenz-rust = "0.6"
-image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+# Paralelismo (configuración del pool global en main.rs)
 rayon = "1"
 
-# HTTP (ComicVine API)
-reqwest = { version = "0.12", features = ["json", "cookies"] }
-lazy_static = "1.5"
-futures = "0.3"
+# Usados directamente en páginas de la UI
+serde_json = "1"
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+reqwest = { version = "0.12", features = ["json"] }
 
-# Fase 4 - CLIP visual embeddings
-candle-core         = { version = "0.9" }
-candle-nn           = { version = "0.9" }
-candle-transformers = { version = "0.9" }
-hf-hub              = { version = "0.3" }
-
-# Fase 3 - UI GTK4 + libadwaita
+# UI GTK4 + libadwaita
 gtk4 = { version = "0.9", features = ["v4_16"] }
 libadwaita = { version = "0.7", features = ["v1_6", "v1_7"] }
 glib = "0.20"

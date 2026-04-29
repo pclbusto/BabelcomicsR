@@ -7,10 +7,10 @@ use gtk4::{self as gtk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::suggestion_service::UnifiedSuggestion;
-use crate::helpers::thumbnail::CardSize;
-use crate::models::ComicbookView;
-use crate::repositories::ComicbookRepository;
+use babelcomics_core::helpers::suggestion_service::UnifiedSuggestion;
+use babelcomics_core::helpers::thumbnail::CardSize;
+use babelcomics_core::models::ComicbookView;
+use babelcomics_core::repositories::ComicbookRepository;
 use crate::ui::run_in_background;
 
 const COVER_HEIGHT: i32 = 400;
@@ -223,7 +223,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    crate::helpers::suggestion_service::suggest_best_matches(&p, comic_id, 10).await
+                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(&p, comic_id, 10).await
                 },
                 move |result| {
                     if s_gen.get() != generation {
@@ -277,7 +277,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                     continue;
                 }
                 if let Ok(res) =
-                    crate::helpers::suggestion_service::suggest_best_matches(&pool_bg, next_id, 10)
+                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(&pool_bg, next_id, 10)
                         .await
                 {
                     cache_bg.lock().unwrap().insert(next_id, res);
@@ -312,7 +312,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                 run_in_background(
                     tokio::runtime::Handle::current(),
                     async move {
-                        crate::repositories::ComicbookRepository::new(&p)
+                        babelcomics_core::repositories::ComicbookRepository::new(&p)
                             .set_info(cid, Some(iid))
                             .await
                     },
@@ -378,7 +378,7 @@ fn append_placeholder(b: &gtk::Box, px: i32) {
 }
 
 fn load_comic_cover_async(comic_id: i64, target: gtk::Box) {
-    let thumb_path = crate::helpers::paths::comic_thumbnail_path(comic_id, CardSize::Large);
+    let thumb_path = babelcomics_core::helpers::paths::comic_thumbnail_path(comic_id, CardSize::Large);
     run_in_background(
         tokio::runtime::Handle::current(),
         async move { tokio::fs::read(&thumb_path).await.ok() },
@@ -416,7 +416,7 @@ fn build_list_row(view: &ComicbookView) -> gtk::ListBoxRow {
     let id = view.id_comicbook;
     let tc_weak = thumb_container.downgrade();
     glib::idle_add_local_once(move || {
-        let thumb_path = crate::helpers::paths::comic_thumbnail_path(id, CardSize::Small);
+        let thumb_path = babelcomics_core::helpers::paths::comic_thumbnail_path(id, CardSize::Small);
         run_in_background(
             tokio::runtime::Handle::current(),
             async move { tokio::fs::read(&thumb_path).await.ok() },
@@ -520,8 +520,8 @@ fn show_match_in_cover(
 ) {
     let Some(m) = matches.get(idx) else { return };
     let method = match m.method {
-        crate::helpers::suggestion_service::SuggestionMethod::Clip => "CLIP · ",
-        crate::helpers::suggestion_service::SuggestionMethod::Hash => "Hash · ",
+        babelcomics_core::helpers::suggestion_service::SuggestionMethod::Clip => "CLIP · ",
+        babelcomics_core::helpers::suggestion_service::SuggestionMethod::Hash => "Hash · ",
     };
     right_info.set_label(&format!(
         "{}{} #{} ({:.0}%)",
@@ -554,7 +554,7 @@ fn show_match_in_cover(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            let bytes = crate::helpers::paths::read_comicbook_info_cover_bytes(
+            let bytes = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
                 r_c.as_deref(),
                 u_o.as_deref(),
                 &n_v,
@@ -638,7 +638,7 @@ fn build_candidate_thumb(
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                let bytes = crate::helpers::paths::read_comicbook_info_cover_bytes(
+                let bytes = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
                     r_c.as_deref(),
                     u_o.as_deref(),
                     &n_v,

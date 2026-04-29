@@ -10,11 +10,11 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::paths::comic_thumbnail_path;
-use crate::helpers::suggestion_service::UnifiedSuggestion;
-use crate::helpers::thumbnail::CardSize;
-use crate::models::{ComicbookView, NewComicbookDetail};
-use crate::repositories::{ComicbookDetailRepository, ComicbookRepository, SetupRepository};
+use babelcomics_core::helpers::paths::comic_thumbnail_path;
+use babelcomics_core::helpers::suggestion_service::UnifiedSuggestion;
+use babelcomics_core::helpers::thumbnail::CardSize;
+use babelcomics_core::models::{ComicbookView, NewComicbookDetail};
+use babelcomics_core::repositories::{ComicbookDetailRepository, ComicbookRepository, SetupRepository};
 use crate::ui::run_in_background;
 
 /// Una vez creada la `adw::TabPage`, actualiza su título con el nombre real del cómic.
@@ -199,8 +199,8 @@ fn build_cover(comic: &ComicbookView, card_size: CardSize) -> gtk::Widget {
             if !thumb_path.exists() {
                 let path_clone = path.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(bytes) = crate::helpers::extractor::extract_cover(&path_clone) {
-                        let _ = crate::helpers::thumbnail::generate_all_thumbnails(
+                    if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone) {
+                        let _ = babelcomics_core::helpers::thumbnail::generate_all_thumbnails(
                             &bytes,
                             id_comicbook,
                         );
@@ -494,7 +494,7 @@ fn show_suggest_dialog(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            crate::helpers::suggestion_service::suggest_best_matches(&pool_done, comic_id, 10).await
+            babelcomics_core::helpers::suggestion_service::suggest_best_matches(&pool_done, comic_id, 10).await
         },
         move |result| match result {
             Err(_) => {
@@ -515,7 +515,7 @@ fn show_suggest_dialog(
 }
 
 fn build_suggestion_row(
-    candidate: &crate::helpers::suggestion_service::UnifiedSuggestion,
+    candidate: &babelcomics_core::helpers::suggestion_service::UnifiedSuggestion,
     comic_id: i64,
     pool: SqlitePool,
     dialog_weak: glib::WeakRef<adw::Window>,
@@ -556,7 +556,7 @@ fn build_suggestion_row(
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                let bytes = crate::helpers::paths::read_comicbook_info_cover_bytes(
+                let bytes = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
                     ruta_cover.as_deref(),
                     url_original.as_deref(),
                     &nombre_volume,
@@ -676,12 +676,12 @@ fn build_suggestion_row(
 
 fn suggestion_similarity_label(
     similarity: f32,
-    method: crate::helpers::suggestion_service::SuggestionMethod,
+    method: babelcomics_core::helpers::suggestion_service::SuggestionMethod,
 ) -> String {
     let pct = (similarity * 100.0).round() as i32;
     let prefix = match method {
-        crate::helpers::suggestion_service::SuggestionMethod::Clip => "CLIP · ",
-        crate::helpers::suggestion_service::SuggestionMethod::Hash => "Hash · ",
+        babelcomics_core::helpers::suggestion_service::SuggestionMethod::Clip => "CLIP · ",
+        babelcomics_core::helpers::suggestion_service::SuggestionMethod::Hash => "Hash · ",
     };
 
     if similarity >= 0.95 {
@@ -777,7 +777,7 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
             );
 
             // Listar páginas sin extraer nada
-            let page_names = crate::helpers::extractor::list_pages(&comic.path).ok()?;
+            let page_names = babelcomics_core::helpers::extractor::list_pages(&comic.path).ok()?;
 
             // Poblar comicbooks_detail si aún no tiene entradas para este comic
             let detail_repo = ComicbookDetailRepository::new(&pool_task);
@@ -793,7 +793,7 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
                         comicbook_id: comic_id,
                         indice_pagina: i as i64,
                         orden_pagina: i as i64,
-                        tipo_pagina: crate::models::TipoPagina::Story,
+                        tipo_pagina: babelcomics_core::models::TipoPagina::Story,
                         nombre_pagina: Some(name.clone()),
                     })
                     .collect();
@@ -805,7 +805,7 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .find(|p| p.tipo_pagina == crate::models::TipoPagina::FrontCover.to_db())
+                .find(|p| p.tipo_pagina == babelcomics_core::models::TipoPagina::FrontCover.to_db())
                 .map(|p| p.indice_pagina);
 
             Some((comic.path, page_names, card_size, cover_indice))
@@ -879,7 +879,7 @@ fn drain_page_thumb_queue(
         async move {
             tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
                 let bytes =
-                    crate::helpers::extractor::extract_page_to_memory(&comic_path, &page_name)
+                    babelcomics_core::helpers::extractor::extract_page_to_memory(&comic_path, &page_name)
                         .ok()?;
                 let img = image::load_from_memory(&bytes).ok()?;
                 drop(bytes);
@@ -1011,11 +1011,11 @@ fn build_page_card(
             if let Some(comic) = comic_opt {
                 let clip_blob = tokio::task::spawn_blocking(move || {
                     let bytes =
-                        crate::helpers::extractor::extract_page_to_memory(&comic.path, &name_c)?;
-                    crate::helpers::thumbnail::generate_all_thumbnails(&bytes, comicbook_id)?;
+                        babelcomics_core::helpers::extractor::extract_page_to_memory(&comic.path, &name_c)?;
+                    babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, comicbook_id)?;
                     // Recalcular CLIP embedding con la nueva portada
-                    let emb = crate::helpers::clip_embedder::embed_image(&bytes)?;
-                    Ok::<Vec<u8>, anyhow::Error>(crate::helpers::clip_embedder::to_bytes(&emb))
+                    let emb = babelcomics_core::helpers::clip_embedder::embed_image(&bytes)?;
+                    Ok::<Vec<u8>, anyhow::Error>(babelcomics_core::helpers::clip_embedder::to_bytes(&emb))
                 })
                 .await
                 .ok()

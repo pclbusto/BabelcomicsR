@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("📦 Inicializando esquema de Rust...");
-    sqlx::migrate!("./migrations").run(&pool_new).await?;
+    sqlx::migrate!("./core/migrations").run(&pool_new).await?;
 
     let pool_old = SqlitePoolOptions::new()
         .max_connections(1)

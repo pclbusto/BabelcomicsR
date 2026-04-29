@@ -194,6 +194,27 @@ dependencies = [
 name = "babelcomics"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "babelcomics-core",
+ "gdk-pixbuf",
+ "gio",
+ "glib",
+ "gtk4",
+ "image",
+ "libadwaita",
+ "rayon",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "babelcomics-core"
+version = "0.1.0"
+dependencies = [
  "aes-gcm",
  "anyhow",
  "base64",
@@ -202,14 +223,9 @@ dependencies = [
  "candle-transformers",
  "chrono",
  "futures",
- "gdk-pixbuf",
- "gio",
- "glib",
- "gtk4",
  "hf-hub",
  "image",
  "lazy_static",
- "libadwaita",
  "rand 0.8.5",
  "rayon",
  "reqwest",
@@ -220,7 +236,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "walkdir",
  "zip 2.4.2",
 ]

@@ -1,6 +1,9 @@
 pub mod pages;
+pub mod preferences_dialog;
 pub mod reader;
 pub mod window;
+
+pub use preferences_dialog::build_preferences_dialog;
 
 use std::cell::RefCell;
 use std::future::Future;

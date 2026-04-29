@@ -1,5 +1,6 @@
 use anyhow::Result;
-use babelcomics::{app, db, helpers, repositories};
+use babelcomics::app;
+use babelcomics_core::{db, helpers, repositories};
 
 #[tokio::main]
 async fn main() -> Result<()> {

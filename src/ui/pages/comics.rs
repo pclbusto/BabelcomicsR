@@ -10,10 +10,10 @@ use gtk4::{self as gtk, ScrolledWindow, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::paths::comic_thumbnail_path;
-use crate::helpers::thumbnail::CardSize;
-use crate::models::{ComicFilter, ComicbookView};
-use crate::repositories::{ComicbookRepository, SetupRepository};
+use babelcomics_core::helpers::paths::comic_thumbnail_path;
+use babelcomics_core::helpers::thumbnail::CardSize;
+use babelcomics_core::models::{ComicFilter, ComicbookView};
+use babelcomics_core::repositories::{ComicbookRepository, SetupRepository};
 use crate::ui::run_in_background;
 
 /// Widgets pendientes de recibir su thumbnail.
@@ -573,8 +573,8 @@ fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size
         if !thumb_path.exists() {
             let path_clone = path.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(bytes) = crate::helpers::extractor::extract_cover(&path_clone) {
-                    let _ = crate::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
+                if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone) {
+                    let _ = babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
                 }
             })
             .await;

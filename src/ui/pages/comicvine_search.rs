@@ -8,10 +8,10 @@ use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use crate::helpers::comicvine_client::ComicVineClient;
-use crate::helpers::download_manager::DownloadManager;
-use crate::helpers::publisher_import_service;
-use crate::repositories::SetupRepository;
+use babelcomics_core::helpers::comicvine_client::ComicVineClient;
+use babelcomics_core::helpers::download_manager::DownloadManager;
+use babelcomics_core::helpers::publisher_import_service;
+use babelcomics_core::repositories::SetupRepository;
 use crate::ui::run_in_background;
 
 // ── Tipos internos ────────────────────────────────────────────────────────────

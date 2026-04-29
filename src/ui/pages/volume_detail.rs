@@ -8,9 +8,9 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::download_manager::DownloadManager;
-use crate::models::{ComicbookInfoView, Volume};
-use crate::repositories::{ComicbookInfoRepository, PublisherRepository, VolumeRepository};
+use babelcomics_core::helpers::download_manager::DownloadManager;
+use babelcomics_core::models::{ComicbookInfoView, Volume};
+use babelcomics_core::repositories::{ComicbookInfoRepository, PublisherRepository, VolumeRepository};
 use crate::ui::run_in_background;
 
 #[derive(Clone, Copy)]
@@ -178,7 +178,7 @@ fn build_info_tab(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
 
 fn build_info_content(
     vol: &Volume,
-    publisher: Option<&crate::models::Publisher>,
+    publisher: Option<&babelcomics_core::models::Publisher>,
     owned: usize,
     total: i64,
     percent: f64,
@@ -204,7 +204,7 @@ fn build_info_content(
         .css_classes(["card"])
         .build();
 
-    let volume_thumb = crate::helpers::paths::volume_thumbnail_path(vol.id_volume);
+    let volume_thumb = babelcomics_core::helpers::paths::volume_thumbnail_path(vol.id_volume);
     if volume_thumb.exists() {
         cover.set_filename(Some(&volume_thumb));
     } else if let Some(path) = first_issue_cover {
@@ -736,12 +736,12 @@ fn build_issues_tab(
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    let setup = crate::repositories::SetupRepository::new(&pool_t)
+                    let setup = babelcomics_core::repositories::SetupRepository::new(&pool_t)
                         .get()
                         .await
                         .unwrap_or_default();
                     let card_size =
-                        crate::helpers::thumbnail::CardSize::from_db(setup.thumbnail_size);
+                        babelcomics_core::helpers::thumbnail::CardSize::from_db(setup.thumbnail_size);
                     let issues = ComicbookInfoRepository::new(&pool_t)
                         .get_view_by_volume_page(volume_id, PAGE, cur_off, q.as_deref(), solo)
                         .await
@@ -854,7 +854,7 @@ fn build_issues_tab(
 fn build_issue_card(
     view: &ComicbookInfoView,
     volume_name: &str,
-    card_size: crate::helpers::thumbnail::CardSize,
+    card_size: babelcomics_core::helpers::thumbnail::CardSize,
     tab_view: adw::TabView,
     pool: SqlitePool,
 ) -> gtk::Widget {
@@ -980,7 +980,7 @@ fn build_issue_card(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            let raw = crate::helpers::paths::read_comicbook_info_cover_bytes(
+            let raw = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
                 ruta_cover.as_deref(),
                 url_original.as_deref(),
                 &volume_name_owned,

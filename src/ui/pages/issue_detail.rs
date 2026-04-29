@@ -4,9 +4,9 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::thumbnail::CardSize;
-use crate::models::{Comicbook, ComicbookInfo, ComicbookInfoCover};
-use crate::repositories::{
+use babelcomics_core::helpers::thumbnail::CardSize;
+use babelcomics_core::models::{Comicbook, ComicbookInfo, ComicbookInfoCover};
+use babelcomics_core::repositories::{
     ComicbookInfoRepository, ComicbookRepository, SetupRepository, VolumeRepository,
 };
 use crate::ui::run_in_background;
@@ -176,7 +176,7 @@ fn build_content(
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    let bytes = crate::helpers::paths::read_comicbook_info_cover_bytes(
+                    let bytes = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
                         ruta_local.as_deref(),
                         url_original.as_deref(),
                         &vol_nombre,

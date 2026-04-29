@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use anyhow::Result;
-use babelcomics::helpers::paths;
+use babelcomics_core::helpers::paths;
 use babelcomics::ui::reader::ReaderWindow;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio};
@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     paths::initialize_thumbnails_base(None);
 
     // Limpiar cachés huérfanos de sesiones anteriores (crashes, apagones, etc.)
-    babelcomics::helpers::extraction_registry::cleanup_stale();
+    babelcomics_core::helpers::extraction_registry::cleanup_stale();
 
     let app = adw::Application::builder()
         .application_id("com.github.babelcomics.standalone-reader")

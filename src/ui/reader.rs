@@ -10,7 +10,7 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 
-use crate::helpers::{extraction_registry, extractor};
+use babelcomics_core::helpers::{extraction_registry, extractor};
 use crate::ui::run_in_background;
 
 /// Número de thumbnails que se generan en paralelo.
@@ -110,7 +110,7 @@ fn reader_thumb_dir(comic_path: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     comic_path.hash(&mut hasher);
     let key = format!("{:016x}", hasher.finish());
-    crate::helpers::paths::thumbnails_dir()
+    babelcomics_core::helpers::paths::thumbnails_dir()
         .join("comic_pages")
         .join("reader")
         .join(key)

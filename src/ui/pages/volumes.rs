@@ -10,10 +10,10 @@ use gtk4::{self as gtk, ScrolledWindow, gdk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::helpers::paths::comic_thumbnail_path;
-use crate::helpers::thumbnail::CardSize;
-use crate::models::VolumeView;
-use crate::repositories::{SetupRepository, VolumeRepository, VolumeSortOrder};
+use babelcomics_core::helpers::paths::comic_thumbnail_path;
+use babelcomics_core::helpers::thumbnail::CardSize;
+use babelcomics_core::models::VolumeView;
+use babelcomics_core::repositories::{SetupRepository, VolumeRepository, VolumeSortOrder};
 use crate::ui::run_in_background;
 
 type PublisherFilter = Rc<RefCell<Vec<i64>>>;
@@ -288,7 +288,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
                 run_in_background(
                     tokio::runtime::Handle::current(),
                     async move {
-                        let dm = crate::helpers::download_manager::DownloadManager::get_instance(
+                        let dm = babelcomics_core::helpers::download_manager::DownloadManager::get_instance(
                             p_loop.clone(),
                         );
                         let repo = VolumeRepository::new(&p_loop);
@@ -727,7 +727,7 @@ fn cargar_pagina(
                         tw_done.borrow_mut().insert(id_portada, img_weak);
                         schedule_thumbnail(id_portada, path.clone(), tx_done.clone(), card_size);
                     } else {
-                        let vt_path = crate::helpers::paths::volume_thumbnail_path(vol.id_volume);
+                        let vt_path = babelcomics_core::helpers::paths::volume_thumbnail_path(vol.id_volume);
                         if vt_path.exists() {
                             let id_neg = -vol.id_volume;
                             tw_done.borrow_mut().insert(id_neg, img_weak);
@@ -1056,8 +1056,8 @@ fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size
         if !thumb_path.exists() {
             let path_clone = path.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(bytes) = crate::helpers::extractor::extract_cover(&path_clone) {
-                    let _ = crate::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
+                if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone) {
+                    let _ = babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
                 }
             })
             .await;
