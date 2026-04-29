@@ -135,7 +135,7 @@ pub fn thumbnail_exists(path: &Path) -> bool {
 /// Retorna `(data, width, height, rowstride)`.
 pub fn resize_to_height_rgb(bytes: &[u8], height: u32) -> Option<(Vec<u8>, i32, i32, i32)> {
     let img = image::load_from_memory(bytes).ok()?;
-    let scaled = img.resize(u32::MAX, height, FilterType::Triangle);
+    let scaled = img.resize(u32::MAX, height, FilterType::Lanczos3);
     drop(img);
     let rgb = scaled.into_rgb8();
     let width = rgb.width() as i32;
@@ -147,7 +147,7 @@ pub fn resize_to_height_rgb(bytes: &[u8], height: u32) -> Option<(Vec<u8>, i32, 
 /// Escala una imagen al `height` indicado y la devuelve codificada como JPEG.
 pub fn resize_to_height_jpeg(bytes: &[u8], height: u32) -> Option<Vec<u8>> {
     let img = image::load_from_memory(bytes).ok()?;
-    let scaled = img.resize(u32::MAX, height, FilterType::Triangle);
+    let scaled = img.resize(u32::MAX, height, FilterType::Lanczos3);
     drop(img);
     let mut out = Vec::new();
     scaled
@@ -207,7 +207,7 @@ pub async fn load_page_thumb(
                 img
             };
 
-            let thumb = img.resize(160, u32::MAX, FilterType::Triangle);
+            let thumb = img.resize(160, u32::MAX, FilterType::Lanczos3);
             drop(img);
 
             if let Some(parent) = thumb_path.parent() {
