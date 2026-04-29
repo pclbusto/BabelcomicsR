@@ -295,12 +295,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
                         for id in sel_loop {
                             if let Ok(Some(vol)) = repo.get_by_id(id).await {
                                 if let Some(cv_id) = vol.id_comicvine {
-                                    let vol_json = serde_json::json!({
-                                        "id": cv_id,
-                                        "name": vol.nombre,
-                                        "count_of_issues": vol.cantidad_numeros,
-                                    });
-                                    dm.add_download(vol_json, download_covers);
+                                    dm.add_download(cv_id, &vol.nombre, vol.cantidad_numeros, download_covers);
                                 }
                             }
                         }
@@ -744,15 +739,12 @@ fn cargar_pagina(
                             let tx = tx_done.clone();
                             let url = vol.image_url.clone();
                             tokio::runtime::Handle::current().spawn(async move {
-                                if let Ok(resp) = reqwest::get(url).await {
-                                    if let Ok(bytes) = resp.bytes().await {
-                                        // Guardar localmente para la próxima vez
-                                        if let Some(parent) = vt_path.parent() {
-                                            let _ = std::fs::create_dir_all(parent);
-                                        }
-                                        let _ = std::fs::write(&vt_path, &bytes);
-                                        let _ = tx.send((id_neg, bytes.to_vec()));
+                                if let Some(bytes) = babelcomics_core::helpers::download_manager::fetch_image_bytes(&url).await {
+                                    if let Some(parent) = vt_path.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
                                     }
+                                    let _ = std::fs::write(&vt_path, &bytes);
+                                    let _ = tx.send((id_neg, bytes));
                                 }
                             });
                         }

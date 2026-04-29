@@ -563,15 +563,8 @@ fn build_suggestion_row(
                     id_volume,
                 )
                 .await?;
-                tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
-                    let img = image::load_from_memory(&bytes).ok()?;
-                    let scaled = img.resize(u32::MAX, 64, image::imageops::FilterType::Triangle);
-                    drop(img);
-                    let rgb = scaled.into_rgb8();
-                    let width = rgb.width() as i32;
-                    let height = rgb.height() as i32;
-                    let rowstride = width * 3;
-                    Some((rgb.into_raw(), width, height, rowstride))
+                tokio::task::spawn_blocking(move || {
+                    babelcomics_core::helpers::thumbnail::resize_to_height_rgb(&bytes, 64)
                 })
                 .await
                 .ok()?
@@ -881,15 +874,7 @@ fn drain_page_thumb_queue(
                 let bytes =
                     babelcomics_core::helpers::extractor::extract_page_to_memory(&comic_path, &page_name)
                         .ok()?;
-                let img = image::load_from_memory(&bytes).ok()?;
-                drop(bytes);
-                let scaled = img.resize(u32::MAX, ch, image::imageops::FilterType::Triangle);
-                drop(img);
-                let rgb = scaled.into_rgb8();
-                let width = rgb.width() as i32;
-                let height = rgb.height() as i32;
-                let rowstride = width * 3;
-                Some((rgb.into_raw(), width, height, rowstride))
+                babelcomics_core::helpers::thumbnail::resize_to_height_rgb(&bytes, ch)
             })
             .await
             .ok()?

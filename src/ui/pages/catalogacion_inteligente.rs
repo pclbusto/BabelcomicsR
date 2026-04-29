@@ -561,16 +561,8 @@ fn show_match_in_cover(
                 i_v,
             )
             .await?;
-            tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
-                let img = image::load_from_memory(&bytes).ok()?;
-                let scaled = img.resize(
-                    u32::MAX,
-                    target_h as u32,
-                    image::imageops::FilterType::Triangle,
-                );
-                let rgb = scaled.into_rgb8();
-                let (w, h) = (rgb.width() as i32, rgb.height() as i32);
-                Some((rgb.into_raw(), w, h, w * 3))
+            tokio::task::spawn_blocking(move || {
+                babelcomics_core::helpers::thumbnail::resize_to_height_rgb(&bytes, target_h as u32)
             })
             .await
             .ok()?
@@ -645,16 +637,8 @@ fn build_candidate_thumb(
                     i_v,
                 )
                 .await?;
-                tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
-                    let img = image::load_from_memory(&bytes).ok()?;
-                    let scaled = img.resize(
-                        u32::MAX,
-                        target_h as u32,
-                        image::imageops::FilterType::Triangle,
-                    );
-                    let rgb = scaled.into_rgb8();
-                    let (w, h) = (rgb.width() as i32, rgb.height() as i32);
-                    Some((rgb.into_raw(), w, h, w * 3))
+                tokio::task::spawn_blocking(move || {
+                    babelcomics_core::helpers::thumbnail::resize_to_height_rgb(&bytes, target_h as u32)
                 })
                 .await
                 .ok()?

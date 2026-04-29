@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use image::{ImageFormat, imageops::FilterType};
@@ -126,4 +126,108 @@ pub fn generate_thumbnail(image_bytes: &[u8], output_path: &Path, size: CardSize
 /// Comprueba si ya existe el thumbnail para un comic.
 pub fn thumbnail_exists(path: &Path) -> bool {
     path.exists()
+}
+
+// ── Utilidades para la UI ─────────────────────────────────────────────────────
+
+/// Escala una imagen al `height` indicado (píxeles) manteniendo la relación
+/// de aspecto y devuelve los píxeles RGB crudos listos para un GdkPixbuf.
+/// Retorna `(data, width, height, rowstride)`.
+pub fn resize_to_height_rgb(bytes: &[u8], height: u32) -> Option<(Vec<u8>, i32, i32, i32)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let scaled = img.resize(u32::MAX, height, FilterType::Triangle);
+    drop(img);
+    let rgb = scaled.into_rgb8();
+    let width = rgb.width() as i32;
+    let h = rgb.height() as i32;
+    let rowstride = width * 3;
+    Some((rgb.into_raw(), width, h, rowstride))
+}
+
+/// Escala una imagen al `height` indicado y la devuelve codificada como JPEG.
+pub fn resize_to_height_jpeg(bytes: &[u8], height: u32) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let scaled = img.resize(u32::MAX, height, FilterType::Triangle);
+    drop(img);
+    let mut out = Vec::new();
+    scaled
+        .write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Jpeg)
+        .ok()?;
+    Some(out)
+}
+
+/// Píxeles RGB crudos de una página escalada, listos para crear un GdkPixbuf.
+pub struct PageThumb {
+    pub data: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub rowstride: i32,
+}
+
+/// Ruta canónica de una página extraída dentro de `dir`.
+pub fn page_path_in(page_name: &str, dir: &Path) -> PathBuf {
+    let file_name = if page_name.chars().all(|c| c.is_ascii_digit()) {
+        format!("page-{}.jpg", page_name)
+    } else {
+        std::path::Path::new(page_name)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+    dir.join(file_name)
+}
+
+/// Genera o carga el thumbnail de una página de cómic y devuelve píxeles RGB
+/// crudos. Devolver píxeles directamente (sin encode JPEG) evita un encode
+/// costoso en el hilo bloqueante y un decode en el hilo principal de GTK.
+pub async fn load_page_thumb(
+    comic_path: String,
+    page_name: String,
+    pages_dir: PathBuf,
+    thumb_path: PathBuf,
+) -> Result<PageThumb> {
+    use crate::helpers::extractor::extract_page_to_memory;
+
+    tokio::task::spawn_blocking(move || -> Result<PageThumb> {
+        let cached = page_path_in(&page_name, &pages_dir);
+
+        let rgb = if thumb_path.exists() {
+            image::open(&thumb_path)
+                .context("No se pudo abrir el thumbnail cacheado")?
+                .into_rgb8()
+        } else {
+            let img = if cached.exists() {
+                image::open(&cached).context("No se pudo abrir la página extraída")?
+            } else {
+                let bytes = extract_page_to_memory(&comic_path, &page_name)?;
+                let img = image::load_from_memory(&bytes)
+                    .context("No se pudo decodificar la página")?;
+                drop(bytes);
+                img
+            };
+
+            let thumb = img.resize(160, u32::MAX, FilterType::Triangle);
+            drop(img);
+
+            if let Some(parent) = thumb_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            thumb
+                .save_with_format(&thumb_path, ImageFormat::Jpeg)
+                .context("No se pudo guardar el thumbnail")?;
+            thumb.into_rgb8()
+        };
+
+        let width = rgb.width() as i32;
+        let height = rgb.height() as i32;
+        let rowstride = width * 3;
+        Ok(PageThumb {
+            data: rgb.into_raw(),
+            width,
+            height,
+            rowstride,
+        })
+    })
+    .await?
 }

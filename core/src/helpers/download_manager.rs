@@ -81,33 +81,30 @@ impl DownloadManager {
         self.active_downloads.clone()
     }
 
-    pub fn add_download(&self, volume_data: Value, download_covers: bool) {
-        let cv_id = volume_data["id"].as_u64().unwrap_or(0).to_string();
-        if cv_id == "0" {
+    pub fn add_download(&self, cv_id: i64, name: &str, count_of_issues: i64, download_covers: bool) {
+        if cv_id == 0 {
             return;
         }
+        let cv_id_str = cv_id.to_string();
 
         let mut active = self.active_downloads.lock().unwrap();
-        if active.contains_key(&cv_id) {
+        if active.contains_key(&cv_id_str) {
             return;
         }
 
         let info = DownloadInfo {
-            volume_cv_id: cv_id.clone(),
-            title: volume_data["name"]
-                .as_str()
-                .unwrap_or("Desconocido")
-                .to_string(),
-            total_issues: volume_data["count_of_issues"].as_i64().unwrap_or(0),
+            volume_cv_id: cv_id_str.clone(),
+            title: name.to_string(),
+            total_issues: count_of_issues,
             progress: 0.0,
             message: "En cola...".to_string(),
             status: DownloadStatus::Queued,
             download_covers,
         };
 
-        active.insert(cv_id.clone(), info);
-        let _ = self.tx_events.send(DownloadEvent::Added(cv_id.clone()));
-        let _ = self.tx_queue.send(cv_id);
+        active.insert(cv_id_str.clone(), info);
+        let _ = self.tx_events.send(DownloadEvent::Added(cv_id_str.clone()));
+        let _ = self.tx_queue.send(cv_id_str);
     }
 
     async fn worker_loop(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<String>) {
@@ -496,4 +493,14 @@ fn strip_html(html: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&nbsp;", " ")
+}
+
+/// Descarga los bytes de una imagen desde una URL.
+/// Devuelve `None` si la URL está vacía o la descarga falla.
+pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
+    if url.is_empty() {
+        return None;
+    }
+    let bytes = reqwest::get(url).await.ok()?.bytes().await.ok()?;
+    Some(bytes.to_vec())
 }

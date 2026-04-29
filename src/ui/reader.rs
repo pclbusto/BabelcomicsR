@@ -10,75 +10,16 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 
-use babelcomics_core::helpers::{extraction_registry, extractor};
+use babelcomics_core::helpers::{extraction_registry, extractor, thumbnail};
 use crate::ui::run_in_background;
 
 /// Número de thumbnails que se generan en paralelo.
-/// Valor bajo a propósito: image::load_from_memory decodifica la imagen completa
-/// en RAM antes de escalar (~24-80 MB por página según resolución).
+/// Valor bajo a propósito: cada página decodificada ocupa ~24-80 MB en RAM.
 const THUMB_CONCURRENCY: usize = 2;
-
-/// Píxeles RGB crudos de un thumbnail escalado a 160px de ancho.
-struct ThumbPixels {
-    data: Vec<u8>,
-    width: i32,
-    height: i32,
-    rowstride: i32,
-}
-
-/// Genera el thumbnail de una página y devuelve píxeles RGB crudos.
-/// Devolver píxeles directamente (sin encode JPEG) evita:
-///   - Un encode costoso en el hilo bloqueante.
-///   - Un decode costoso en el hilo principal de GTK.
-/// La imagen completa se libera explícitamente antes de devolver los píxeles.
-async fn make_thumbnail(
-    comic_path: String,
-    page_name: String,
-    pages_dir: PathBuf,
-    thumb_path: PathBuf,
-) -> anyhow::Result<ThumbPixels> {
-    let cached = page_path_in(&page_name, &pages_dir);
-
-    tokio::task::spawn_blocking(move || -> anyhow::Result<ThumbPixels> {
-        let rgb = if thumb_path.exists() {
-            image::open(&thumb_path)?.into_rgb8()
-        } else {
-            let img = if cached.exists() {
-                image::open(&cached)?
-            } else {
-                let bytes = extractor::extract_page_to_memory(&comic_path, &page_name)?;
-                let img = image::load_from_memory(&bytes)?;
-                drop(bytes); // liberar bytes comprimidos antes de escalar
-                img
-            };
-
-            let thumb = img.resize(160, u32::MAX, image::imageops::FilterType::Triangle);
-            drop(img); // liberar imagen completa (~24-80 MB) antes de convertir
-
-            if let Some(parent) = thumb_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg)?;
-            thumb.into_rgb8()
-        };
-        let width = rgb.width() as i32;
-        let height = rgb.height() as i32;
-        let rowstride = width * 3;
-        let data = rgb.into_raw();
-
-        Ok(ThumbPixels {
-            data,
-            width,
-            height,
-            rowstride,
-        })
-    })
-    .await?
-}
 
 /// Crea un Pixbuf desde píxeles RGB crudos (sin decode) y lo aplica al widget.
 /// Es instantáneo en el hilo principal porque no hay decodificación.
-fn apply_thumbnail(img: &gtk::Image, t: ThumbPixels) {
+fn apply_thumbnail(img: &gtk::Image, t: thumbnail::PageThumb) {
     let pixbuf = Pixbuf::from_bytes(
         &glib::Bytes::from_owned(t.data),
         gdk_pixbuf::Colorspace::Rgb,
@@ -92,19 +33,6 @@ fn apply_thumbnail(img: &gtk::Image, t: ThumbPixels) {
     img.set_paintable(Some(&texture));
 }
 
-/// Calcula la ruta esperada de una página extraída en `dir`.
-fn page_path_in(page_name: &str, dir: &PathBuf) -> PathBuf {
-    let file_name = if page_name.chars().all(|c| c.is_ascii_digit()) {
-        format!("page-{}.jpg", page_name)
-    } else {
-        std::path::Path::new(page_name)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    };
-    dir.join(file_name)
-}
 
 fn reader_thumb_dir(comic_path: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -413,7 +341,7 @@ impl ReaderWindow {
 
         run_in_background(
             tokio::runtime::Handle::current(),
-            make_thumbnail(comic_path, page_name, temp_dir, thumb_path),
+            thumbnail::load_page_thumb(comic_path, page_name, temp_dir, thumb_path),
             move |res| {
                 if !r.alive.get() {
                     return;
@@ -521,7 +449,7 @@ impl ReaderWindow {
     }
 
     fn page_path_for(&self, page_name: &str) -> PathBuf {
-        page_path_in(page_name, &self.temp_dir)
+        thumbnail::page_path_in(page_name, &self.temp_dir)
     }
 
     fn setup_logic(&self, btn_fs: &gtk::Button, btn_menu: &gtk::MenuButton) {

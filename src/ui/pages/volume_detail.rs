@@ -217,14 +217,12 @@ fn build_info_content(
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                if let Ok(resp) = reqwest::get(url).await {
-                    if let Ok(bytes) = resp.bytes().await {
-                        if let Some(parent) = vt_path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::write(&vt_path, &bytes);
-                        return Some(vt_path);
+                if let Some(bytes) = babelcomics_core::helpers::download_manager::fetch_image_bytes(&url).await {
+                    if let Some(parent) = vt_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
+                    let _ = std::fs::write(&vt_path, &bytes);
+                    return Some(vt_path);
                 }
                 None
             },
@@ -370,16 +368,8 @@ fn build_info_content(
                     if response == "cancel" { return; }
                     let download_covers = response == "covers";
 
-                    // Construimos el Value mínimo que necesita add_download:
-                    // id, name y count_of_issues
-                    let vol_json = serde_json::json!({
-                        "id": cv_id,
-                        "name": nombre,
-                        "count_of_issues": vol_cantidad,
-                    });
-
                     let dm = DownloadManager::get_instance(pool_d.clone());
-                    dm.add_download(vol_json, download_covers);
+                    dm.add_download(cv_id, &nombre, vol_cantidad, download_covers);
                 });
 
                 dialog.present(parent_widget.as_ref());
@@ -991,16 +981,7 @@ fn build_issue_card(
             // Escalar a la altura del card_size para que el WrapBox calcule bien el ancho
             let raw = raw?;
             tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-                let img = image::load_from_memory(&raw).ok()?;
-                let scaled = img.resize(u32::MAX, ch, image::imageops::FilterType::Triangle);
-                let mut out = Vec::new();
-                scaled
-                    .write_to(
-                        &mut std::io::Cursor::new(&mut out),
-                        image::ImageFormat::Jpeg,
-                    )
-                    .ok()?;
-                Some(out)
+                babelcomics_core::helpers::thumbnail::resize_to_height_jpeg(&raw, ch)
             })
             .await
             .ok()?

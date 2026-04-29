@@ -3,13 +3,12 @@ use gdk_pixbuf;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk};
 use libadwaita as adw;
-use serde_json::Value;
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use babelcomics_core::helpers::comicvine_client::ComicVineClient;
-use babelcomics_core::helpers::download_manager::DownloadManager;
+use babelcomics_core::helpers::comicvine_client::{ComicVineClient, CvPublisherResult, CvVolumeResult};
+use babelcomics_core::helpers::download_manager::{DownloadManager, fetch_image_bytes};
 use babelcomics_core::helpers::publisher_import_service;
 use babelcomics_core::repositories::SetupRepository;
 use crate::ui::run_in_background;
@@ -23,8 +22,8 @@ enum SearchMode {
 }
 
 enum SearchResults {
-    Volumes(BTreeMap<String, Vec<Value>>),
-    Publishers(Vec<Value>),
+    Volumes(BTreeMap<String, Vec<CvVolumeResult>>),
+    Publishers(Vec<CvPublisherResult>),
     Empty,
 }
 
@@ -168,8 +167,8 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
     main_box.append(&scrolled);
 
     // ── Estado compartido ─────────────────────────────────────────────────────
-    let selected_volumes: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
-    let selected_publishers: Arc<Mutex<HashMap<String, Value>>> =
+    let selected_volumes: Arc<Mutex<HashMap<String, CvVolumeResult>>> = Arc::new(Mutex::new(HashMap::new()));
+    let selected_publishers: Arc<Mutex<HashMap<String, i64>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     // ── Cambio de modo (Dropdown) ─────────────────────────────────────────────
@@ -267,14 +266,9 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                         }
                         SearchMode::Volumes => {
                             let volumes = client.get_volumes(Some(&query), None).await;
-                            let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+                            let mut groups: BTreeMap<String, Vec<CvVolumeResult>> = BTreeMap::new();
                             for vol in volumes {
-                                let name = vol["name"].as_str().unwrap_or("").to_lowercase();
-                                let pub_name = vol["publisher"]["name"]
-                                    .as_str()
-                                    .unwrap_or("unknown")
-                                    .to_lowercase();
-                                let key = format!("{}|{}", name, pub_name);
+                                let key = format!("{}|{}", vol.name.to_lowercase(), vol.publisher_name.to_lowercase());
                                 groups.entry(key).or_default().push(vol);
                             }
                             SearchResults::Volumes(groups)
@@ -350,7 +344,7 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                 let p = p_dl.clone();
                 let btn_ref = btn_a.clone();
                 let status_ref = status.clone();
-                let pub_list: Vec<Value> = pubs.into_values().collect();
+                let pub_ids: Vec<i64> = pubs.into_values().collect();
 
                 run_in_background(
                     tokio::runtime::Handle::current(),
@@ -369,11 +363,7 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                         let mut total_skipped = 0usize;
                         let mut names: Vec<String> = Vec::new();
 
-                        for pub_data in &pub_list {
-                            let cv_id = match pub_data["id"].as_i64() {
-                                Some(id) => id,
-                                None => continue,
-                            };
+                        for cv_id in pub_ids {
                             match publisher_import_service::import_publisher_from_cv(
                                 &p, &client, cv_id,
                             )
@@ -419,8 +409,8 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                 }
 
                 let dm = DownloadManager::get_instance(p_dl.clone());
-                for (_, vol_data) in vols {
-                    dm.add_download(vol_data, true);
+                for (_, vol) in vols {
+                    dm.add_download(vol.cv_id, &vol.name, vol.count_of_issues, true);
                 }
             }
         });
@@ -442,8 +432,8 @@ fn show_empty_msg(flow: &gtk::FlowBox, text: &str) {
 }
 
 fn build_group_card(
-    volumes: Vec<Value>,
-    selected_volumes: Arc<Mutex<HashMap<String, Value>>>,
+    volumes: Vec<CvVolumeResult>,
+    selected_volumes: Arc<Mutex<HashMap<String, CvVolumeResult>>>,
     btn_action: gtk::Button,
 ) -> gtk::Widget {
     let card = gtk::Box::builder()
@@ -460,7 +450,7 @@ fn build_group_card(
         let carousel = adw::Carousel::builder().spacing(12).build();
         for vol in volumes {
             carousel.append(&build_volume_widget(
-                &vol,
+                vol,
                 selected_volumes.clone(),
                 btn_action.clone(),
             ));
@@ -471,7 +461,7 @@ fn build_group_card(
             .build();
         card.append(&carousel);
         card.append(&dots);
-    } else if let Some(vol) = volumes.first() {
+    } else if let Some(vol) = volumes.into_iter().next() {
         card.append(&build_volume_widget(vol, selected_volumes, btn_action));
     }
 
@@ -479,8 +469,8 @@ fn build_group_card(
 }
 
 fn build_volume_widget(
-    vol: &Value,
-    selected_volumes: Arc<Mutex<HashMap<String, Value>>>,
+    vol: CvVolumeResult,
+    selected_volumes: Arc<Mutex<HashMap<String, CvVolumeResult>>>,
     btn_action: gtk::Button,
 ) -> gtk::Widget {
     let container = gtk::Box::builder()
@@ -488,10 +478,9 @@ fn build_volume_widget(
         .spacing(4)
         .build();
 
-    let vol_clone = vol.clone();
-    let cv_id = vol["id"].as_u64().unwrap_or(0).to_string();
+    let cv_id = vol.cv_id.to_string();
+    let img_url = vol.image_url.clone();
 
-    let img_url = vol["image"]["medium_url"].as_str().unwrap_or("");
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Contain)
@@ -500,10 +489,9 @@ fn build_volume_widget(
 
     if !img_url.is_empty() {
         let picture_clone = picture.clone();
-        let url = img_url.to_string();
         run_in_background(
             tokio::runtime::Handle::current(),
-            async move { reqwest::get(url).await.ok()?.bytes().await.ok() },
+            async move { fetch_image_bytes(&img_url).await },
             move |bytes| {
                 if let Some(b) = bytes {
                     let loader = gdk_pixbuf::PixbufLoader::new();
@@ -519,19 +507,15 @@ fn build_volume_widget(
     container.append(&picture);
 
     let lbl_title = gtk::Label::builder()
-        .label(vol["name"].as_str().unwrap_or("Sin título"))
+        .label(&vol.name)
         .css_classes(["title-4"])
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .halign(gtk::Align::Start)
         .build();
     container.append(&lbl_title);
 
-    let year = vol["start_year"].as_str().unwrap_or("N/A");
-    let pub_name = vol["publisher"]["name"]
-        .as_str()
-        .unwrap_or("Editorial desconocida");
     let lbl_info = gtk::Label::builder()
-        .label(&format!("{} ({})", pub_name, year))
+        .label(&format!("{} ({})", vol.publisher_name, vol.start_year))
         .css_classes(["caption", "dim-label"])
         .halign(gtk::Align::Start)
         .build();
@@ -545,7 +529,7 @@ fn build_volume_widget(
     check.connect_toggled(move |cb| {
         let mut sel = sel_ref.lock().unwrap();
         if cb.is_active() {
-            sel.insert(id_key.clone(), vol_clone.clone());
+            sel.insert(id_key.clone(), vol.clone());
         } else {
             sel.remove(&id_key);
         }
@@ -557,8 +541,8 @@ fn build_volume_widget(
 }
 
 fn build_publisher_card(
-    pub_data: Value,
-    selected_publishers: Arc<Mutex<HashMap<String, Value>>>,
+    pub_data: CvPublisherResult,
+    selected_publishers: Arc<Mutex<HashMap<String, i64>>>,
     btn_action: gtk::Button,
 ) -> gtk::Widget {
     let card = gtk::Box::builder()
@@ -577,10 +561,7 @@ fn build_publisher_card(
         .build();
 
     // Logo
-    let img_url = pub_data["image"]["medium_url"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let img_url = pub_data.image_url.clone();
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Contain)
@@ -589,10 +570,9 @@ fn build_publisher_card(
 
     if !img_url.is_empty() {
         let picture_clone = picture.clone();
-        let url = img_url.clone();
         run_in_background(
             tokio::runtime::Handle::current(),
-            async move { reqwest::get(url).await.ok()?.bytes().await.ok() },
+            async move { fetch_image_bytes(&img_url).await },
             move |bytes| {
                 if let Some(b) = bytes {
                     let loader = gdk_pixbuf::PixbufLoader::new();
@@ -608,12 +588,8 @@ fn build_publisher_card(
     container.append(&picture);
 
     // Nombre
-    let name = pub_data["name"]
-        .as_str()
-        .unwrap_or("Sin nombre")
-        .to_string();
     let lbl_name = gtk::Label::builder()
-        .label(&name)
+        .label(&pub_data.name)
         .css_classes(["title-4"])
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .halign(gtk::Align::Start)
@@ -621,15 +597,14 @@ fn build_publisher_card(
     container.append(&lbl_name);
 
     // Subtítulo: deck o ciudad de la editorial
-    let subtitle = pub_data["deck"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or_else(|| pub_data["location_city"].as_str().filter(|s| !s.is_empty()))
-        .unwrap_or("");
-
+    let subtitle = if !pub_data.deck.is_empty() {
+        pub_data.deck.clone()
+    } else {
+        pub_data.location_city.clone()
+    };
     if !subtitle.is_empty() {
         let lbl_sub = gtk::Label::builder()
-            .label(subtitle)
+            .label(&subtitle)
             .css_classes(["caption", "dim-label"])
             .halign(gtk::Align::Start)
             .wrap(true)
@@ -638,33 +613,27 @@ fn build_publisher_card(
         container.append(&lbl_sub);
     }
 
-    // Cantidad de volúmenes conocidos (si la API lo devuelve)
-    if let Some(count) = pub_data["count_of_issues"].as_u64().or_else(|| {
-        pub_data["volume_credits"]
-            .as_array()
-            .map(|a| a.len() as u64)
-    }) {
-        if count > 0 {
-            let lbl_count = gtk::Label::builder()
-                .label(&format!("{} números", count))
-                .css_classes(["caption", "dim-label"])
-                .halign(gtk::Align::Start)
-                .build();
-            container.append(&lbl_count);
-        }
+    // Cantidad de volúmenes conocidos
+    if pub_data.count_of_issues > 0 {
+        let lbl_count = gtk::Label::builder()
+            .label(&format!("{} números", pub_data.count_of_issues))
+            .css_classes(["caption", "dim-label"])
+            .halign(gtk::Align::Start)
+            .build();
+        container.append(&lbl_count);
     }
 
     // Checkbox de selección
     let check = gtk::CheckButton::builder().label("Seleccionar").build();
-    let cv_id = pub_data["id"].as_u64().unwrap_or(0).to_string();
+    let cv_id = pub_data.cv_id;
+    let id_key = cv_id.to_string();
     let sel_ref = selected_publishers.clone();
     let btn_ref = btn_action.clone();
-    let id_key = cv_id.clone();
 
     check.connect_toggled(move |cb| {
         let mut sel = sel_ref.lock().unwrap();
         if cb.is_active() {
-            sel.insert(id_key.clone(), pub_data.clone());
+            sel.insert(id_key.clone(), cv_id);
         } else {
             sel.remove(&id_key);
         }

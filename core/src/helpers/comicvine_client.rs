@@ -6,6 +6,58 @@ use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+/// Resultado tipado de una búsqueda de volúmenes en ComicVine.
+#[derive(Debug, Clone)]
+pub struct CvVolumeResult {
+    pub cv_id: i64,
+    pub name: String,
+    pub publisher_name: String,
+    pub image_url: String,
+    pub start_year: String,
+    pub count_of_issues: i64,
+}
+
+impl CvVolumeResult {
+    fn from_value(v: &Value) -> Option<Self> {
+        Some(CvVolumeResult {
+            cv_id: v["id"].as_i64()?,
+            name: v["name"].as_str().unwrap_or("").to_string(),
+            publisher_name: v["publisher"]["name"].as_str().unwrap_or("").to_string(),
+            image_url: v["image"]["medium_url"].as_str().unwrap_or("").to_string(),
+            start_year: v["start_year"].as_str().unwrap_or("N/A").to_string(),
+            count_of_issues: v["count_of_issues"].as_i64().unwrap_or(0),
+        })
+    }
+}
+
+/// Resultado tipado de una búsqueda de editoriales en ComicVine.
+#[derive(Debug, Clone)]
+pub struct CvPublisherResult {
+    pub cv_id: i64,
+    pub name: String,
+    pub image_url: String,
+    pub deck: String,
+    pub location_city: String,
+    pub count_of_issues: i64,
+}
+
+impl CvPublisherResult {
+    fn from_value(v: &Value) -> Option<Self> {
+        let count = v["count_of_issues"]
+            .as_u64()
+            .or_else(|| v["volume_credits"].as_array().map(|a| a.len() as u64))
+            .unwrap_or(0) as i64;
+        Some(CvPublisherResult {
+            cv_id: v["id"].as_i64()?,
+            name: v["name"].as_str().unwrap_or("").to_string(),
+            image_url: v["image"]["medium_url"].as_str().unwrap_or("").to_string(),
+            deck: v["deck"].as_str().unwrap_or("").to_string(),
+            location_city: v["location_city"].as_str().unwrap_or("").to_string(),
+            count_of_issues: count,
+        })
+    }
+}
+
 const BASE_URL: &str = "https://comicvine.gamespot.com/api/";
 const API_RESULTS_LIMIT: usize = 100;
 const MAX_CONCURRENT: usize = 5;
@@ -196,7 +248,7 @@ impl ComicVineClient {
         limit: usize,
         offset: usize,
         name_filter: Option<&str>,
-    ) -> Vec<Value> {
+    ) -> Vec<CvPublisherResult> {
         let mut params: Params = vec![
             ("limit".into(), limit.to_string()),
             ("offset".into(), offset.to_string()),
@@ -209,6 +261,9 @@ impl ComicVineClient {
             .await
             .and_then(|d| d["results"].as_array().cloned())
             .unwrap_or_default()
+            .iter()
+            .filter_map(CvPublisherResult::from_value)
+            .collect()
     }
 
     pub async fn get_publisher_details(&self, publisher_id: &str) -> Option<Value> {
@@ -221,7 +276,7 @@ impl ComicVineClient {
 
     // ── Volumes ───────────────────────────────────────────────────────────────
 
-    pub async fn get_volumes(&self, query: Option<&str>, publisher_id: Option<&str>) -> Vec<Value> {
+    pub async fn get_volumes(&self, query: Option<&str>, publisher_id: Option<&str>) -> Vec<CvVolumeResult> {
         let filter_str = build_filter(&[
             query.map(|q| format!("name:{}", sanitize_query(q))),
             publisher_id.map(|p| format!("publisher:{}", p)),
@@ -241,40 +296,38 @@ impl ComicVineClient {
             .cloned()
             .unwrap_or_default();
 
-        if total <= all.len() {
-            return all;
-        }
+        if total > all.len() {
+            // Páginas restantes en paralelo (limitadas por MAX_CONCURRENT)
+            let num_pages = (total + API_RESULTS_LIMIT - 1) / API_RESULTS_LIMIT;
+            let mut set = tokio::task::JoinSet::new();
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
-        // Páginas restantes en paralelo (limitadas por MAX_CONCURRENT)
-        let num_pages = (total + API_RESULTS_LIMIT - 1) / API_RESULTS_LIMIT;
-        let mut set = tokio::task::JoinSet::new();
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
+            for page in 1..num_pages {
+                let offset = page * API_RESULTS_LIMIT;
+                if offset >= total {
+                    break;
+                }
+                let client = self.clone();
+                let filter = filter_str.clone();
+                let sem = semaphore.clone();
 
-        for page in 1..num_pages {
-            let offset = page * API_RESULTS_LIMIT;
-            if offset >= total {
-                break;
+                set.spawn(async move {
+                    let _permit = sem.acquire().await;
+                    let params = page_params(API_RESULTS_LIMIT, offset, &filter);
+                    client.make_request("volumes/", params).await
+                });
             }
-            let client = self.clone();
-            let filter = filter_str.clone();
-            let sem = semaphore.clone();
 
-            set.spawn(async move {
-                let _permit = sem.acquire().await;
-                let params = page_params(API_RESULTS_LIMIT, offset, &filter);
-                client.make_request("volumes/", params).await
-            });
-        }
-
-        while let Some(res) = set.join_next().await {
-            if let Ok(Some(data)) = res {
-                if let Some(results) = data["results"].as_array() {
-                    all.extend(results.clone());
+            while let Some(res) = set.join_next().await {
+                if let Ok(Some(data)) = res {
+                    if let Some(results) = data["results"].as_array() {
+                        all.extend(results.clone());
+                    }
                 }
             }
         }
 
-        all
+        all.iter().filter_map(CvVolumeResult::from_value).collect()
     }
 
     pub async fn get_volume_details(&self, volume_id: &str) -> Option<Value> {
