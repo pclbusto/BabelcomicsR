@@ -1,18 +1,18 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{mpsc, LazyLock};
+use std::sync::{LazyLock, mpsc};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use gtk4::prelude::*;
-use gtk4::{self as gtk, glib, ScrolledWindow};
+use gtk4::{self as gtk, ScrolledWindow, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
 use crate::helpers::paths::comic_thumbnail_path;
 use crate::helpers::thumbnail::CardSize;
-use crate::models::{ComicbookView, ComicFilter};
+use crate::models::{ComicFilter, ComicbookView};
 use crate::repositories::{ComicbookRepository, SetupRepository};
 use crate::ui::run_in_background;
 
@@ -50,7 +50,13 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         .margin_end(12)
         .build();
 
-    filter_vbox.append(&gtk::Label::builder().label("Filtros").halign(gtk::Align::Start).css_classes(["heading"]).build());
+    filter_vbox.append(
+        &gtk::Label::builder()
+            .label("Filtros")
+            .halign(gtk::Align::Start)
+            .css_classes(["heading"])
+            .build(),
+    );
 
     let check_classified = gtk::CheckButton::with_label("Solo clasificados");
     filter_vbox.append(&check_classified);
@@ -58,7 +64,13 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     let check_unclassified = gtk::CheckButton::with_label("Solo sin clasificar");
     filter_vbox.append(&check_unclassified);
 
-    filter_vbox.append(&gtk::Label::builder().label("Calidad mínima").halign(gtk::Align::Start).css_classes(["caption"]).build());
+    filter_vbox.append(
+        &gtk::Label::builder()
+            .label("Calidad mínima")
+            .halign(gtk::Align::Start)
+            .css_classes(["caption"])
+            .build(),
+    );
     let scale_quality = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 5.0, 1.0);
     scale_quality.set_draw_value(true);
     filter_vbox.append(&scale_quality);
@@ -168,9 +180,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     let comic_id_registry: ComicIdRegistry = Rc::new(RefCell::new(Vec::new()));
 
     // ── Menú contextual (click derecho sobre selección) ───────────────────────
-    let ctx_popover = gtk::Popover::builder()
-        .has_arrow(false)
-        .build();
+    let ctx_popover = gtk::Popover::builder().has_arrow(false).build();
     // Usamos un Button flat en lugar de ActionRow+ListBox para garantizar
     // que connect_clicked funcione sin ambigüedades dentro del Popover.
     let clip_btn_inner = gtk::Box::builder()
@@ -226,11 +236,11 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     }
 
     // ── Estado de paginación ─────────────────────────────────────────────────
-    let offset: Rc<Cell<i64>>     = Rc::new(Cell::new(0));
+    let offset: Rc<Cell<i64>> = Rc::new(Cell::new(0));
     let generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
-    let loading: Rc<Cell<bool>>   = Rc::new(Cell::new(false));
+    let loading: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let all_loaded: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    let page_size: Rc<Cell<i64>>  = Rc::new(Cell::new(200));
+    let page_size: Rc<Cell<i64>> = Rc::new(Cell::new(200));
     let last_clicked: Rc<Cell<i32>> = Rc::new(Cell::new(-1));
     let filter_state: Rc<RefCell<ComicFilter>> = Rc::new(RefCell::new(ComicFilter::default()));
     let total_count: Rc<Cell<i64>> = Rc::new(Cell::new(0));
@@ -238,25 +248,34 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 
     // ── Closure que actualiza el label con total / cargados / seleccionados ──
     let actualizar_label: Rc<dyn Fn()> = {
-        let label    = results_label.clone();
+        let label = results_label.clone();
         let total_rc = total_count.clone();
         let offset_rc = offset.clone();
-        let wb_weak  = wrap_box.downgrade();
+        let wb_weak = wrap_box.downgrade();
         Rc::new(move || {
             let total = total_rc.get();
-            if total == 0 { label.set_text(""); return; }
+            if total == 0 {
+                label.set_text("");
+                return;
+            }
 
-            let loaded   = offset_rc.get();
+            let loaded = offset_rc.get();
             let selected = wb_weak.upgrade().map_or(0, |wb| contar_seleccionados(&wb));
 
-            let mut parts = vec![
-                if total == 1 { "1 comic".to_string() } else { format!("{} comics", total) }
-            ];
+            let mut parts = vec![if total == 1 {
+                "1 comic".to_string()
+            } else {
+                format!("{} comics", total)
+            }];
             if loaded < total {
                 parts.push(format!("{} cargados", loaded));
             }
             if selected > 0 {
-                parts.push(if selected == 1 { "1 seleccionado".to_string() } else { format!("{} seleccionados", selected) });
+                parts.push(if selected == 1 {
+                    "1 seleccionado".to_string()
+                } else {
+                    format!("{} seleccionados", selected)
+                });
             }
             label.set_text(&parts.join(" · "));
         })
@@ -285,7 +304,9 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
                 child = c.next_sibling();
                 i += 1;
             }
-            if selected.is_empty() { return; }
+            if selected.is_empty() {
+                return;
+            }
             let page = crate::ui::window::add_tab(
                 &tv,
                 crate::ui::window::TabKind::CatalogacionInteligente(selected, pool_ctx.clone()),
@@ -307,8 +328,12 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         let thumb_widgets_r = thumb_widgets.clone();
         let thumb_tx_r = thumb_tx.clone();
         let (off, load, done, ps, lc, gen_state) = (
-            offset.clone(), loading.clone(), all_loaded.clone(),
-            page_size.clone(), last_clicked.clone(), generation.clone(),
+            offset.clone(),
+            loading.clone(),
+            all_loaded.clone(),
+            page_size.clone(),
+            last_clicked.clone(),
+            generation.clone(),
         );
 
         let tab_view_r = tab_view.clone();
@@ -317,7 +342,9 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         let total_count_r = total_count.clone();
         let on_update_r = actualizar_label.clone();
         let refresh_fn = move || {
-            while let Some(child) = wrap_box.first_child() { wrap_box.remove(&child); }
+            while let Some(child) = wrap_box.first_child() {
+                wrap_box.remove(&child);
+            }
             thumb_widgets_r.borrow_mut().clear();
             registry_r.borrow_mut().clear();
 
@@ -332,9 +359,16 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 
             let filter = fs_refresh.borrow().clone();
             cargar_pagina(
-                &wrap_box, &stack, &pool,
-                &off, &load, &done, &ps,
-                &thumb_widgets_r, &thumb_tx_r, &lc,
+                &wrap_box,
+                &stack,
+                &pool,
+                &off,
+                &load,
+                &done,
+                &ps,
+                &thumb_widgets_r,
+                &thumb_tx_r,
+                &lc,
                 true,
                 filter,
                 &tab_view_r,
@@ -386,7 +420,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         });
         controller.add_shortcut(gtk::Shortcut::new(
             Some(gtk::ShortcutTrigger::parse_string("F5").unwrap()),
-            Some(action)
+            Some(action),
         ));
     }
 
@@ -395,26 +429,39 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         let adj = scrolled.vadjustment();
         let (wb_s, stack_s, pool_s) = (wrap_box.clone(), stack.clone(), pool.clone());
         let (off_s, load_s, done_s, ps_s, lc_s, gen_s) = (
-            offset.clone(), loading.clone(), all_loaded.clone(),
-            page_size.clone(), last_clicked.clone(), generation.clone(),
+            offset.clone(),
+            loading.clone(),
+            all_loaded.clone(),
+            page_size.clone(),
+            last_clicked.clone(),
+            generation.clone(),
         );
-        let tw_s  = thumb_widgets.clone();
+        let tw_s = thumb_widgets.clone();
         let ttx_s = thumb_tx.clone();
-        let fs_s  = filter_state.clone();
+        let fs_s = filter_state.clone();
         let tab_view_s = tab_view.clone();
         let registry_s = comic_id_registry.clone();
         let ctx_popover_s = ctx_popover.clone();
         let total_count_s = total_count.clone();
         let on_update_s = actualizar_label.clone();
         adj.connect_value_changed(move |adj| {
-            if load_s.get() || done_s.get() { return; }
+            if load_s.get() || done_s.get() {
+                return;
+            }
             if adj.value() + adj.page_size() >= adj.upper() - 800.0 {
                 let filter = fs_s.borrow().clone();
                 let current_gen = gen_s.get();
                 cargar_pagina(
-                    &wb_s, &stack_s, &pool_s,
-                    &off_s, &load_s, &done_s, &ps_s,
-                    &tw_s, &ttx_s, &lc_s,
+                    &wb_s,
+                    &stack_s,
+                    &pool_s,
+                    &off_s,
+                    &load_s,
+                    &done_s,
+                    &ps_s,
+                    &tw_s,
+                    &ttx_s,
+                    &lc_s,
                     false,
                     filter,
                     &tab_view_s,
@@ -431,9 +478,16 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 
     // ── Carga inicial ────────────────────────────────────────────────────────
     cargar_pagina(
-        &wrap_box, &stack, &pool,
-        &offset, &loading, &all_loaded, &page_size,
-        &thumb_widgets, &thumb_tx, &last_clicked,
+        &wrap_box,
+        &stack,
+        &pool,
+        &offset,
+        &loading,
+        &all_loaded,
+        &page_size,
+        &thumb_widgets,
+        &thumb_tx,
+        &last_clicked,
         true,
         ComicFilter::default(),
         &tab_view,
@@ -475,13 +529,19 @@ fn start_thumbnail_consumer(
             match rx.try_recv() {
                 Ok((id, bytes)) => {
                     // Ignorar resultados de pages antiguas (id ya no está en el mapa)
-                    let Some((numero, weak_box)) = w.remove(&id) else { continue; };
-                    let Some(image_container) = weak_box.upgrade() else { continue; };
+                    let Some((numero, weak_box)) = w.remove(&id) else {
+                        continue;
+                    };
+                    let Some(image_container) = weak_box.upgrade() else {
+                        continue;
+                    };
 
                     // gdk::Texture::from_bytes usa libjpeg-turbo internamente:
                     // decode JPEG en <1ms sin salir del hilo GTK.
                     let gbytes = glib::Bytes::from_owned(bytes);
-                    let Ok(texture) = gtk::gdk::Texture::from_bytes(&gbytes) else { continue; };
+                    let Ok(texture) = gtk::gdk::Texture::from_bytes(&gbytes) else {
+                        continue;
+                    };
 
                     while let Some(child) = image_container.first_child() {
                         image_container.remove(&child);
@@ -516,7 +576,8 @@ fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size
                 if let Ok(bytes) = crate::helpers::extractor::extract_cover(&path_clone) {
                     let _ = crate::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
                 }
-            }).await;
+            })
+            .await;
         }
 
         // El spawn_blocking ya terminó: el archivo existe o falló — lectura directa.
@@ -550,26 +611,28 @@ fn cargar_pagina(
     total_count: &Rc<Cell<i64>>,
     on_update: &Rc<dyn Fn()>,
 ) {
-    if loading.get() { return; }
+    if loading.get() {
+        return;
+    }
     loading.set(true);
 
     if is_first {
         stack.set_visible_child_name("loading");
     }
 
-    let current_offset    = offset.get();
+    let current_offset = offset.get();
     let current_page_size = page_size.get();
-    let pool_task  = pool.clone();
+    let pool_task = pool.clone();
     let flow_done: adw::WrapBox = flow.clone();
     let stack_done = stack.clone();
-    let offset_done  = offset.clone();
+    let offset_done = offset.clone();
     let loading_done = loading.clone();
-    let all_done     = all_loaded.clone();
-    let ps_done      = page_size.clone();
-    let tw_done      = thumb_widgets.clone();
-    let ttx_done     = thumb_tx.clone();
-    let lc_done      = last_clicked.clone();
-    let pool_ui      = pool.clone();
+    let all_done = all_loaded.clone();
+    let ps_done = page_size.clone();
+    let tw_done = thumb_widgets.clone();
+    let ttx_done = thumb_tx.clone();
+    let lc_done = last_clicked.clone();
+    let pool_ui = pool.clone();
     let tab_view_done = tab_view.clone();
     let registry_done = registry_done.clone();
     let ctx_popover_done = ctx_popover.clone();
@@ -644,7 +707,7 @@ fn cargar_pagina(
 
             // Agregar cards en lotes idle para no bloquear el hilo GTK
             let comics = Rc::new(comics);
-            let idx    = Rc::new(RefCell::new(0usize));
+            let idx = Rc::new(RefCell::new(0usize));
             const BATCH: usize = 25;
 
             glib::idle_add_local(move || {
@@ -654,23 +717,26 @@ fn cargar_pagina(
                 }
 
                 let start = *idx.borrow();
-                let end   = (start + BATCH).min(comics.len());
+                let end = (start + BATCH).min(comics.len());
 
                 for comic in &comics[start..end] {
                     let (card, img_weak) = build_card(comic, card_size);
                     adjuntar_gesto_seleccion(
-                        &card, &flow_done, &lc_done,
-                        comic.id_comicbook, pool_ui.clone(), tab_view_done.clone(),
+                        &card,
+                        &flow_done,
+                        &lc_done,
+                        comic.id_comicbook,
+                        pool_ui.clone(),
+                        tab_view_done.clone(),
                         ctx_popover_done.clone(),
                         on_update_idle.clone(),
                     );
                     flow_done.append(&card);
                     registry_done.borrow_mut().push(comic.id_comicbook);
 
-                    tw_done.borrow_mut().insert(
-                        comic.id_comicbook,
-                        (comic.numero.clone(), img_weak),
-                    );
+                    tw_done
+                        .borrow_mut()
+                        .insert(comic.id_comicbook, (comic.numero.clone(), img_weak));
                     schedule_thumbnail(
                         comic.id_comicbook,
                         comic.path.clone(),
@@ -715,9 +781,13 @@ fn adjuntar_gesto_seleccion(
         let pop = ctx_popover.clone();
         let on_sel_r = on_selection_change.clone();
         right_click.connect_pressed(move |g, _, x, y| {
-            let (Some(wb), Some(card)) = (wb_weak_r.upgrade(), card_weak_r.upgrade()) else { return };
+            let (Some(wb), Some(card)) = (wb_weak_r.upgrade(), card_weak_r.upgrade()) else {
+                return;
+            };
             // Si el popover perdió su parent por alguna razón, no intentar mostrarlo.
-            let Some(pop_parent) = pop.parent() else { return };
+            let Some(pop_parent) = pop.parent() else {
+                return;
+            };
             if !card.has_css_class("selected") {
                 wb_deselect_all(&wb);
                 card.add_css_class("selected");
@@ -725,7 +795,9 @@ fn adjuntar_gesto_seleccion(
                 on_sel_r();
             }
             // Traducir coordenadas de la card al espacio del parent del popover.
-            let (wx, wy) = card.translate_coordinates(&pop_parent, x, y).unwrap_or((x, y));
+            let (wx, wy) = card
+                .translate_coordinates(&pop_parent, x, y)
+                .unwrap_or((x, y));
             let rect = gtk::gdk::Rectangle::new(wx as i32, wy as i32, 1, 1);
             pop.set_pointing_to(Some(&rect));
             pop.popup();
@@ -734,13 +806,15 @@ fn adjuntar_gesto_seleccion(
         card.add_controller(right_click);
     }
 
-    let gesture   = gtk::GestureClick::new();
-    let wb_weak   = wrap_box.downgrade();
+    let gesture = gtk::GestureClick::new();
+    let wb_weak = wrap_box.downgrade();
     let card_weak = card.downgrade();
-    let lc        = last_clicked.clone();
+    let lc = last_clicked.clone();
 
     gesture.connect_pressed(move |g, n_press, _, _| {
-        let (Some(wb), Some(card)) = (wb_weak.upgrade(), card_weak.upgrade()) else { return };
+        let (Some(wb), Some(card)) = (wb_weak.upgrade(), card_weak.upgrade()) else {
+            return;
+        };
 
         // Doble-click: abrir solapa de detalle
         if n_press >= 2 {
@@ -763,16 +837,20 @@ fn adjuntar_gesto_seleccion(
         }
 
         // Click simple: selección
-        let mods  = g.current_event_state();
-        let ctrl  = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let mods = g.current_event_state();
+        let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
 
-        let idx   = wb_child_index(&wb, &card);
+        let idx = wb_child_index(&wb, &card);
 
         if shift && lc.get() >= 0 {
             wb_deselect_all(&wb);
             let last = lc.get();
-            let (a, b) = if last <= idx { (last, idx) } else { (idx, last) };
+            let (a, b) = if last <= idx {
+                (last, idx)
+            } else {
+                (idx, last)
+            };
             wb_select_range(&wb, a, b);
         } else if ctrl {
             if card.has_css_class("selected") {
@@ -798,7 +876,9 @@ fn contar_seleccionados(wb: &adw::WrapBox) -> usize {
     let mut n = 0usize;
     let mut child = wb.first_child();
     while let Some(c) = child {
-        if c.has_css_class("selected") { n += 1; }
+        if c.has_css_class("selected") {
+            n += 1;
+        }
         child = c.next_sibling();
     }
     n
@@ -808,7 +888,9 @@ fn wb_child_index(wb: &adw::WrapBox, target: &gtk::Widget) -> i32 {
     let mut child = wb.first_child();
     let mut i = 0i32;
     while let Some(c) = child {
-        if &c == target { return i; }
+        if &c == target {
+            return i;
+        }
         child = c.next_sibling();
         i += 1;
     }
@@ -827,7 +909,9 @@ fn wb_select_range(wb: &adw::WrapBox, from: i32, to: i32) {
     let mut child = wb.first_child();
     let mut i = 0i32;
     while let Some(c) = child {
-        if i >= from && i <= to { c.add_css_class("selected"); }
+        if i >= from && i <= to {
+            c.add_css_class("selected");
+        }
         child = c.next_sibling();
         i += 1;
     }
@@ -838,9 +922,12 @@ fn wb_select_range(wb: &adw::WrapBox, from: i32, to: i32) {
 /// Construye la card de un comic con placeholder.
 /// Devuelve (widget, weak_ref al contenedor de imagen) para registrar
 /// la carga async del thumbnail.
-fn build_card(comic: &ComicbookView, card_size: CardSize) -> (gtk::Widget, glib::WeakRef<gtk::Box>) {
+fn build_card(
+    comic: &ComicbookView,
+    card_size: CardSize,
+) -> (gtk::Widget, glib::WeakRef<gtk::Box>) {
     let (cw, ch) = card_size.dims();
-    
+
     // La card ya no tiene ancho fijo. Se adapta a su contenido.
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -946,7 +1033,10 @@ fn create_info_box(comic: &ComicbookView) -> gtk::Box {
     if let Some(calidad) = &comic.calidad {
         if let Ok(val) = calidad.parse::<i32>() {
             let stars = "★".repeat(val as usize);
-            let label = gtk::Label::builder().label(&stars).css_classes(["caption", "accent"]).build();
+            let label = gtk::Label::builder()
+                .label(&stars)
+                .css_classes(["caption", "accent"])
+                .build();
             extra_info.append(&label);
         }
     }
@@ -972,9 +1062,7 @@ fn cover_frame_from_texture(texture: &gtk::gdk::Texture, numero: Option<&str>) -
     picture.set_content_fit(gtk::ContentFit::Contain);
     picture.set_can_shrink(true);
     picture.add_css_class("cover-image");
-    let overlay = gtk::Overlay::builder()
-        .child(&picture)
-        .build();
+    let overlay = gtk::Overlay::builder().child(&picture).build();
 
     if let Some(num) = numero {
         let num_tag = gtk::Label::builder()

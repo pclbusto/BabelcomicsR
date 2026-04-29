@@ -1,7 +1,7 @@
 use anyhow::Result;
-use sqlx::{SqlitePool, Row};
+use sqlx::{Row, SqlitePool};
 
-use crate::models::{Volume, NewVolume, parse_search_query};
+use crate::models::{NewVolume, Volume, parse_search_query};
 
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum VolumeSortOrder {
@@ -17,11 +17,11 @@ pub enum VolumeSortOrder {
 impl VolumeSortOrder {
     fn to_sql(self) -> &'static str {
         match self {
-            Self::NombreAsc  => "v.nombre COLLATE NOCASE ASC",
+            Self::NombreAsc => "v.nombre COLLATE NOCASE ASC",
             Self::NombreDesc => "v.nombre COLLATE NOCASE DESC",
-            Self::AnioAsc    => "v.anio_inicio ASC, v.nombre COLLATE NOCASE ASC",
-            Self::AnioDesc   => "v.anio_inicio DESC, v.nombre COLLATE NOCASE ASC",
-            Self::IssuesAsc  => "v.cantidad_numeros ASC, v.nombre COLLATE NOCASE ASC",
+            Self::AnioAsc => "v.anio_inicio ASC, v.nombre COLLATE NOCASE ASC",
+            Self::AnioDesc => "v.anio_inicio DESC, v.nombre COLLATE NOCASE ASC",
+            Self::IssuesAsc => "v.cantidad_numeros ASC, v.nombre COLLATE NOCASE ASC",
             Self::IssuesDesc => "v.cantidad_numeros DESC, v.nombre COLLATE NOCASE ASC",
         }
     }
@@ -49,7 +49,7 @@ impl<'a> VolumeRepository<'a> {
                 COALESCE(anio_inicio, 0) as anio_inicio,
                 COALESCE(cantidad_numeros, 0) as cantidad_numeros,
                 id_comicvine
-               FROM volumens ORDER BY nombre COLLATE NOCASE"#
+               FROM volumens ORDER BY nombre COLLATE NOCASE"#,
         )
         .fetch_all(self.pool)
         .await?;
@@ -69,7 +69,7 @@ impl<'a> VolumeRepository<'a> {
                 COALESCE(anio_inicio, 0) as anio_inicio,
                 COALESCE(cantidad_numeros, 0) as cantidad_numeros,
                 id_comicvine
-               FROM volumens WHERE id_volume = ?"#
+               FROM volumens WHERE id_volume = ?"#,
         )
         .bind(id)
         .fetch_optional(self.pool)
@@ -90,7 +90,7 @@ impl<'a> VolumeRepository<'a> {
                 COALESCE(anio_inicio, 0) as anio_inicio,
                 COALESCE(cantidad_numeros, 0) as cantidad_numeros,
                 id_comicvine
-               FROM volumens WHERE id_publisher = ?"#
+               FROM volumens WHERE id_publisher = ?"#,
         )
         .bind(publisher_id)
         .fetch_all(self.pool)
@@ -111,7 +111,7 @@ impl<'a> VolumeRepository<'a> {
                 COALESCE(anio_inicio, 0) as anio_inicio,
                 COALESCE(cantidad_numeros, 0) as cantidad_numeros,
                 id_comicvine
-               FROM volumens WHERE id_comicvine = ?"#
+               FROM volumens WHERE id_comicvine = ?"#,
         )
         .bind(comicvine_id)
         .fetch_optional(self.pool)
@@ -135,7 +135,7 @@ impl<'a> VolumeRepository<'a> {
                 id_comicvine
                FROM volumens
                WHERE nombre LIKE ? OR deck LIKE ?
-               ORDER BY nombre COLLATE NOCASE"#
+               ORDER BY nombre COLLATE NOCASE"#,
         )
         .bind(&pattern)
         .bind(&pattern)
@@ -161,7 +161,7 @@ impl<'a> VolumeRepository<'a> {
         .bind(&new.image_url)
         .execute(self.pool)
         .await?;
-        
+
         Ok(result.last_insert_rowid())
     }
 
@@ -170,7 +170,7 @@ impl<'a> VolumeRepository<'a> {
             "UPDATE volumens
              SET nombre = ?, deck = ?, descripcion = ?, url = ?, id_publisher = ?,
                  anio_inicio = ?, cantidad_numeros = ?, id_comicvine = ?, image_url = ?
-             WHERE id_volume = ?"
+             WHERE id_volume = ?",
         )
         .bind(&volume.nombre)
         .bind(&volume.deck)
@@ -217,7 +217,7 @@ impl<'a> VolumeRepository<'a> {
         )
         .fetch_one(self.pool)
         .await?;
-        
+
         Ok(row.get(0))
     }
 
@@ -237,7 +237,11 @@ impl<'a> VolumeRepository<'a> {
         let pub_filter_sql = if publisher_ids.is_empty() {
             String::new()
         } else {
-            let placeholders = publisher_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            let placeholders = publisher_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("AND v.id_publisher IN ({})", placeholders)
         };
 
@@ -279,22 +283,21 @@ impl<'a> VolumeRepository<'a> {
         for &id in publisher_ids {
             q = q.bind(id);
         }
-        let rows = q
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(self.pool)
-            .await?;
+        let rows = q.bind(limit).bind(offset).fetch_all(self.pool).await?;
 
-        Ok(rows.into_iter().map(|r| crate::models::VolumeView {
-            id_volume: r.get(0),
-            nombre: r.get(1),
-            anio_inicio: r.get(2),
-            cantidad_numeros: r.get(3),
-            cantidad_poseida: r.get(4),
-            id_comicbook_portada: r.get(5),
-            path_portada: r.get(6),
-            image_url: r.get(7),
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::models::VolumeView {
+                id_volume: r.get(0),
+                nombre: r.get(1),
+                anio_inicio: r.get(2),
+                cantidad_numeros: r.get(3),
+                cantidad_poseida: r.get(4),
+                id_comicbook_portada: r.get(5),
+                path_portada: r.get(6),
+                image_url: r.get(7),
+            })
+            .collect())
     }
 
     /// Editoriales que tienen al menos un volumen en la biblioteca
@@ -319,9 +322,7 @@ impl<'a> VolumeRepository<'a> {
 
 /// Genera el fragmento WHERE y los binds para la búsqueda avanzada de volúmenes.
 /// Columnas: `v.nombre` (título de la serie) y `v.deck` (descripción corta).
-fn build_volume_search_fragment(
-    parsed: &crate::models::ParsedQuery,
-) -> (String, Vec<String>) {
+fn build_volume_search_fragment(parsed: &crate::models::ParsedQuery) -> (String, Vec<String>) {
     if parsed.is_empty() {
         return (String::new(), Vec::new());
     }

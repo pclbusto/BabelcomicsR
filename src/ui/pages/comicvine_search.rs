@@ -1,17 +1,17 @@
-use std::sync::{Arc, Mutex};
-use std::collections::{BTreeMap, HashMap};
+use adw::prelude::*;
+use gdk_pixbuf;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk};
 use libadwaita as adw;
-use adw::prelude::*;
-use sqlx::SqlitePool;
 use serde_json::Value;
-use gdk_pixbuf;
+use sqlx::SqlitePool;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
-use crate::repositories::SetupRepository;
 use crate::helpers::comicvine_client::ComicVineClient;
 use crate::helpers::download_manager::DownloadManager;
 use crate::helpers::publisher_import_service;
+use crate::repositories::SetupRepository;
 use crate::ui::run_in_background;
 
 // ── Tipos internos ────────────────────────────────────────────────────────────
@@ -94,9 +94,7 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
         .build();
     search_entry_box.append(&btn_search);
 
-    let spinner = gtk::Spinner::builder()
-        .valign(gtk::Align::Center)
-        .build();
+    let spinner = gtk::Spinner::builder().valign(gtk::Align::Center).build();
     search_entry_box.append(&spinner);
 
     search_box.append(&search_entry_box);
@@ -170,8 +168,7 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
     main_box.append(&scrolled);
 
     // ── Estado compartido ─────────────────────────────────────────────────────
-    let selected_volumes: Arc<Mutex<HashMap<String, Value>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let selected_volumes: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
     let selected_publishers: Arc<Mutex<HashMap<String, Value>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -193,7 +190,9 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                 entry.set_placeholder_text(Some("Nombre del volumen (ej: Batman, Spider-Man...)"));
                 btn.set_label("Descargar Seleccionados");
             } else {
-                entry.set_placeholder_text(Some("Nombre de la editorial (ej: Marvel, DC Comics...)"));
+                entry.set_placeholder_text(Some(
+                    "Nombre de la editorial (ej: Marvel, DC Comics...)",
+                ));
                 btn.set_label("Importar Seleccionados");
             }
 
@@ -331,12 +330,17 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
         let status = status_label.clone();
 
         btn_action.connect_clicked(move |btn| {
-            let is_publishers = combo.active_id().map(|id| id == "publishers").unwrap_or(false);
+            let is_publishers = combo
+                .active_id()
+                .map(|id| id == "publishers")
+                .unwrap_or(false);
 
             if is_publishers {
                 // ── Importar editoriales ──────────────────────────────────────
                 let pubs = sel_p.lock().unwrap().clone();
-                if pubs.is_empty() { return; }
+                if pubs.is_empty() {
+                    return;
+                }
 
                 btn.set_sensitive(false);
                 btn.set_label("Importando...");
@@ -370,7 +374,11 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                                 Some(id) => id,
                                 None => continue,
                             };
-                            match publisher_import_service::import_publisher_from_cv(&p, &client, cv_id).await {
+                            match publisher_import_service::import_publisher_from_cv(
+                                &p, &client, cv_id,
+                            )
+                            .await
+                            {
                                 Ok(report) => {
                                     total_inserted += report.volumes_inserted;
                                     total_skipped += report.volumes_skipped;
@@ -406,7 +414,9 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
             } else {
                 // ── Descargar volúmenes ───────────────────────────────────────
                 let vols = sel_v.lock().unwrap().clone();
-                if vols.is_empty() { return; }
+                if vols.is_empty() {
+                    return;
+                }
 
                 let dm = DownloadManager::get_instance(p_dl.clone());
                 for (_, vol_data) in vols {
@@ -449,7 +459,11 @@ fn build_group_card(
     if volumes.len() > 1 {
         let carousel = adw::Carousel::builder().spacing(12).build();
         for vol in volumes {
-            carousel.append(&build_volume_widget(&vol, selected_volumes.clone(), btn_action.clone()));
+            carousel.append(&build_volume_widget(
+                &vol,
+                selected_volumes.clone(),
+                btn_action.clone(),
+            ));
         }
         let dots = adw::CarouselIndicatorDots::builder()
             .carousel(&carousel)
@@ -513,7 +527,9 @@ fn build_volume_widget(
     container.append(&lbl_title);
 
     let year = vol["start_year"].as_str().unwrap_or("N/A");
-    let pub_name = vol["publisher"]["name"].as_str().unwrap_or("Editorial desconocida");
+    let pub_name = vol["publisher"]["name"]
+        .as_str()
+        .unwrap_or("Editorial desconocida");
     let lbl_info = gtk::Label::builder()
         .label(&format!("{} ({})", pub_name, year))
         .css_classes(["caption", "dim-label"])
@@ -561,7 +577,10 @@ fn build_publisher_card(
         .build();
 
     // Logo
-    let img_url = pub_data["image"]["medium_url"].as_str().unwrap_or("").to_string();
+    let img_url = pub_data["image"]["medium_url"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     let picture = gtk::Picture::builder()
         .can_shrink(true)
         .content_fit(gtk::ContentFit::Contain)
@@ -589,7 +608,10 @@ fn build_publisher_card(
     container.append(&picture);
 
     // Nombre
-    let name = pub_data["name"].as_str().unwrap_or("Sin nombre").to_string();
+    let name = pub_data["name"]
+        .as_str()
+        .unwrap_or("Sin nombre")
+        .to_string();
     let lbl_name = gtk::Label::builder()
         .label(&name)
         .css_classes(["title-4"])
@@ -617,9 +639,11 @@ fn build_publisher_card(
     }
 
     // Cantidad de volúmenes conocidos (si la API lo devuelve)
-    if let Some(count) = pub_data["count_of_issues"].as_u64()
-        .or_else(|| pub_data["volume_credits"].as_array().map(|a| a.len() as u64))
-    {
+    if let Some(count) = pub_data["count_of_issues"].as_u64().or_else(|| {
+        pub_data["volume_credits"]
+            .as_array()
+            .map(|a| a.len() as u64)
+    }) {
         if count > 0 {
             let lbl_count = gtk::Label::builder()
                 .label(&format!("{} números", count))

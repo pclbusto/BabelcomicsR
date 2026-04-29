@@ -39,14 +39,20 @@ pub fn migrate_thumbnails(old_path: PathBuf, new_path: PathBuf) -> std::io::Resu
     }
 
     // Intentar mover las subcarpetas principales
-    let subdirs = ["comics", "volumes", "publishers", "comicbook_info", "comic_pages"];
-    
+    let subdirs = [
+        "comics",
+        "volumes",
+        "publishers",
+        "comicbook_info",
+        "comic_pages",
+    ];
+
     std::fs::create_dir_all(&new_path)?;
 
     for subdir in subdirs {
         let from = old_path.join(subdir);
         let to = new_path.join(subdir);
-        
+
         if from.exists() {
             // Siempre usamos move_recursive: rename de directorios falla si el destino
             // ya existe o si origen y destino están en distintos filesystems (EXDEV).
@@ -111,13 +117,14 @@ pub fn comic_thumbnail_path(id: i64, size: CardSize) -> PathBuf {
         .join(format!("{}.jpg", id))
 }
 
-
 pub fn volume_thumbnail_path(id: i64) -> PathBuf {
     thumbnails_dir().join("volumes").join(format!("{}.jpg", id))
 }
 
 pub fn publisher_thumbnail_path(id: i64) -> PathBuf {
-    thumbnails_dir().join("publishers").join(format!("{}.jpg", id))
+    thumbnails_dir()
+        .join("publishers")
+        .join(format!("{}.jpg", id))
 }
 
 /// Ruta del thumbnail de una página individual de un comic.
@@ -133,9 +140,20 @@ pub fn comicbook_info_thumbnail_path(volume_name: &str, volume_id: i64, filename
     // Sanitizar el nombre del volumen eliminando caracteres problemáticos
     let sanitized_name = volume_name
         .chars()
-        .filter(|&c| c != '.' && c != ':' && c != '/' && c != '\\' && c != '?' && c != '*' && c != '"' && c != '<' && c != '>' && c != '|')
+        .filter(|&c| {
+            c != '.'
+                && c != ':'
+                && c != '/'
+                && c != '\\'
+                && c != '?'
+                && c != '*'
+                && c != '"'
+                && c != '<'
+                && c != '>'
+                && c != '|'
+        })
         .collect::<String>();
-        
+
     let folder_name = format!("{}_{}", sanitized_name, volume_id);
     thumbnails_dir()
         .join("comicbook_info")

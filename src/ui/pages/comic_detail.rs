@@ -3,11 +3,11 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
-use adw::prelude::*;
 use sqlx::SqlitePool;
 
 use crate::helpers::paths::comic_thumbnail_path;
@@ -62,7 +62,7 @@ pub fn build(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
     let info_content = build_info_tab(comic_id, pool.clone());
     let info_page = inner_tab_view.append(&info_content);
     info_page.set_title("Información");
-    info_page.set_icon(Some(&gio::ThemedIcon::new("info-outline-symbolic")));
+    info_page.set_icon(Some(&gio::ThemedIcon::new("dialog-information-symbolic")));
 
     // Pestaña: Páginas
     let pages_content = build_pages_tab(comic_id, pool.clone());
@@ -115,10 +115,7 @@ fn build_info_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
                 .await
                 .ok()
                 .flatten()?;
-            let setup = SetupRepository::new(&pool)
-                .get()
-                .await
-                .unwrap_or_default();
+            let setup = SetupRepository::new(&pool).get().await.unwrap_or_default();
             let card_size = CardSize::from_db(setup.thumbnail_size);
             Some((comic, card_size))
         },
@@ -203,9 +200,13 @@ fn build_cover(comic: &ComicbookView, card_size: CardSize) -> gtk::Widget {
                 let path_clone = path.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Ok(bytes) = crate::helpers::extractor::extract_cover(&path_clone) {
-                        let _ = crate::helpers::thumbnail::generate_all_thumbnails(&bytes, id_comicbook);
+                        let _ = crate::helpers::thumbnail::generate_all_thumbnails(
+                            &bytes,
+                            id_comicbook,
+                        );
                     }
-                }).await;
+                })
+                .await;
             }
             tokio::fs::read(&thumb_path).await.ok()
         },
@@ -259,14 +260,22 @@ fn build_basic_info(comic: &ComicbookView, pool: SqlitePool) -> gtk::Box {
 
     add_row(&file_group, "ID", &format!("#{}", comic.id_comicbook));
 
-    let estado = if comic.titulo.is_some() { "Clasificado" } else { "Sin clasificar" };
+    let estado = if comic.titulo.is_some() {
+        "Clasificado"
+    } else {
+        "Sin clasificar"
+    };
     add_row(&file_group, "Estado", estado);
 
     if let Some(ref calidad) = comic.calidad {
         add_row(&file_group, "Calidad", calidad);
     }
 
-    add_row(&file_group, "En papelera", if comic.en_papelera { "Sí" } else { "No" });
+    add_row(
+        &file_group,
+        "En papelera",
+        if comic.en_papelera { "Sí" } else { "No" },
+    );
 
     // Ruta
     let path_row = adw::ActionRow::builder()
@@ -333,7 +342,9 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget 
         .tooltip_text("Abrir en el lector integrado")
         .build();
     read_btn.connect_clicked(move |_| {
-        let Some(app) = gio::Application::default() else { return };
+        let Some(app) = gio::Application::default() else {
+            return;
+        };
         if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
             crate::ui::reader::ReaderWindow::open(adw_app, &path_for_reader);
         }
@@ -428,11 +439,7 @@ fn show_suggest_dialog(
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .build();
-    loading_box.append(
-        &adw::Spinner::builder()
-            .halign(gtk::Align::Center)
-            .build(),
-    );
+    loading_box.append(&adw::Spinner::builder().halign(gtk::Align::Center).build());
     loading_box.append(
         &gtk::Label::builder()
             .label("Calculando similitudes…")
@@ -487,10 +494,7 @@ fn show_suggest_dialog(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            crate::helpers::suggestion_service::suggest_best_matches(
-                &pool_done, comic_id, 10,
-            )
-            .await
+            crate::helpers::suggestion_service::suggest_best_matches(&pool_done, comic_id, 10).await
         },
         move |result| match result {
             Err(_) => {
@@ -557,14 +561,15 @@ fn build_suggestion_row(
                     url_original.as_deref(),
                     &nombre_volume,
                     id_volume,
-                ).await?;
+                )
+                .await?;
                 tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
-                    let img    = image::load_from_memory(&bytes).ok()?;
+                    let img = image::load_from_memory(&bytes).ok()?;
                     let scaled = img.resize(u32::MAX, 64, image::imageops::FilterType::Triangle);
                     drop(img);
-                    let rgb       = scaled.into_rgb8();
-                    let width     = rgb.width() as i32;
-                    let height    = rgb.height() as i32;
+                    let rgb = scaled.into_rgb8();
+                    let width = rgb.width() as i32;
+                    let height = rgb.height() as i32;
                     let rowstride = width * 3;
                     Some((rgb.into_raw(), width, height, rowstride))
                 })
@@ -578,7 +583,11 @@ fn build_suggestion_row(
                     let pixbuf = Pixbuf::from_bytes(
                         &glib::Bytes::from_owned(data),
                         gdk_pixbuf::Colorspace::Rgb,
-                        false, 8, width, height, rowstride,
+                        false,
+                        8,
+                        width,
+                        height,
+                        rowstride,
                     );
                     while let Some(child) = container.first_child() {
                         container.remove(&child);
@@ -631,7 +640,10 @@ fn build_suggestion_row(
 
     info_box.append(
         &gtk::Label::builder()
-            .label(&suggestion_similarity_label(candidate.similarity, candidate.method))
+            .label(&suggestion_similarity_label(
+                candidate.similarity,
+                candidate.method,
+            ))
             .halign(gtk::Align::Start)
             .css_classes(["caption", "dim-label"])
             .build(),
@@ -662,7 +674,10 @@ fn build_suggestion_row(
     gtk::ListBoxRow::builder().child(&row_box).build()
 }
 
-fn suggestion_similarity_label(similarity: f32, method: crate::helpers::suggestion_service::SuggestionMethod) -> String {
+fn suggestion_similarity_label(
+    similarity: f32,
+    method: crate::helpers::suggestion_service::SuggestionMethod,
+) -> String {
     let pct = (similarity * 100.0).round() as i32;
     let prefix = match method {
         crate::helpers::suggestion_service::SuggestionMethod::Clip => "CLIP · ",
@@ -749,9 +764,16 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
         tokio::runtime::Handle::current(),
         async move {
             let comic = ComicbookRepository::new(&pool_task)
-                .get_view_by_id(comic_id).await.ok().flatten()?;
+                .get_view_by_id(comic_id)
+                .await
+                .ok()
+                .flatten()?;
             let card_size = CardSize::from_db(
-                SetupRepository::new(&pool_task).get().await.unwrap_or_default().thumbnail_size
+                SetupRepository::new(&pool_task)
+                    .get()
+                    .await
+                    .unwrap_or_default()
+                    .thumbnail_size,
             );
 
             // Listar páginas sin extraer nada
@@ -759,16 +781,19 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
 
             // Poblar comicbooks_detail si aún no tiene entradas para este comic
             let detail_repo = ComicbookDetailRepository::new(&pool_task);
-            let existing = detail_repo.get_by_comicbook(comic_id).await.unwrap_or_default();
+            let existing = detail_repo
+                .get_by_comicbook(comic_id)
+                .await
+                .unwrap_or_default();
             if existing.is_empty() {
                 let new_pages: Vec<NewComicbookDetail> = page_names
                     .iter()
                     .enumerate()
                     .map(|(i, name)| NewComicbookDetail {
-                        comicbook_id:  comic_id,
+                        comicbook_id: comic_id,
                         indice_pagina: i as i64,
-                        orden_pagina:  i as i64,
-                        tipo_pagina:   crate::models::TipoPagina::Story,
+                        orden_pagina: i as i64,
+                        tipo_pagina: crate::models::TipoPagina::Story,
                         nombre_pagina: Some(name.clone()),
                     })
                     .collect();
@@ -776,7 +801,9 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
             }
 
             let cover_indice = detail_repo
-                .get_by_comicbook(comic_id).await.unwrap_or_default()
+                .get_by_comicbook(comic_id)
+                .await
+                .unwrap_or_default()
                 .into_iter()
                 .find(|p| p.tipo_pagina == crate::models::TipoPagina::FrontCover.to_db())
                 .map(|p| p.indice_pagina);
@@ -797,7 +824,12 @@ fn build_pages_tab(comic_id: i64, pool: SqlitePool) -> gtk::Widget {
                 for (i, page_name) in page_names.into_iter().enumerate() {
                     let is_cover = cover_indice.map_or(i == 0, |ci| ci == i as i64);
                     let (card, btn, container_weak) = build_page_card(
-                        i, &page_name, card_size, comic_id, pool.clone(), is_cover,
+                        i,
+                        &page_name,
+                        card_size,
+                        comic_id,
+                        pool.clone(),
+                        is_cover,
                         cover_btns.clone(),
                     );
                     cover_btns.borrow_mut().push((i as i64, btn));
@@ -838,22 +870,24 @@ fn drain_page_thumb_queue(
     let Some(job) = job else { return };
 
     let comic_path = job.comic_path;
-    let page_name  = job.page_name;
-    let ch         = job.ch;
-    let container  = job.container;
+    let page_name = job.page_name;
+    let ch = job.ch;
+    let container = job.container;
 
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
             tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
-                let bytes = crate::helpers::extractor::extract_page_to_memory(&comic_path, &page_name).ok()?;
-                let img   = image::load_from_memory(&bytes).ok()?;
+                let bytes =
+                    crate::helpers::extractor::extract_page_to_memory(&comic_path, &page_name)
+                        .ok()?;
+                let img = image::load_from_memory(&bytes).ok()?;
                 drop(bytes);
                 let scaled = img.resize(u32::MAX, ch, image::imageops::FilterType::Triangle);
                 drop(img);
-                let rgb       = scaled.into_rgb8();
-                let width     = rgb.width() as i32;
-                let height    = rgb.height() as i32;
+                let rgb = scaled.into_rgb8();
+                let width = rgb.width() as i32;
+                let height = rgb.height() as i32;
                 let rowstride = width * 3;
                 Some((rgb.into_raw(), width, height, rowstride))
             })
@@ -868,7 +902,11 @@ fn drain_page_thumb_queue(
                     let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
                         &glib::Bytes::from_owned(data),
                         gdk_pixbuf::Colorspace::Rgb,
-                        false, 8, width, height, rowstride,
+                        false,
+                        8,
+                        width,
+                        height,
+                        rowstride,
                     );
                     while let Some(child) = container.first_child() {
                         container.remove(&child);
@@ -928,7 +966,11 @@ fn build_page_card(
         .build();
     image_container.append(&placeholder);
 
-    let btn_icon = if is_cover { "starred-symbolic" } else { "emblem-default-symbolic" };
+    let btn_icon = if is_cover {
+        "starred-symbolic"
+    } else {
+        "emblem-default-symbolic"
+    };
     let btn_cover = gtk::Button::builder()
         .icon_name(btn_icon)
         .halign(gtk::Align::End)
@@ -962,12 +1004,14 @@ fn build_page_card(
 
             // Regenerar thumbnail de portada a partir del nombre de página
             let comic_opt = ComicbookRepository::new(&pool_c)
-                .get_view_by_id(comicbook_id).await.ok().flatten();
+                .get_view_by_id(comicbook_id)
+                .await
+                .ok()
+                .flatten();
             if let Some(comic) = comic_opt {
                 let clip_blob = tokio::task::spawn_blocking(move || {
-                    let bytes = crate::helpers::extractor::extract_page_to_memory(
-                        &comic.path, &name_c,
-                    )?;
+                    let bytes =
+                        crate::helpers::extractor::extract_page_to_memory(&comic.path, &name_c)?;
                     crate::helpers::thumbnail::generate_all_thumbnails(&bytes, comicbook_id)?;
                     // Recalcular CLIP embedding con la nueva portada
                     let emb = crate::helpers::clip_embedder::embed_image(&bytes)?;

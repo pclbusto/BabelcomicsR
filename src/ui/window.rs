@@ -1,10 +1,28 @@
+use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
-use adw::prelude::*;
 use sqlx::SqlitePool;
+use std::sync::mpsc::Sender;
 
 use super::pages;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClipProgressStats {
+    pub total: i64,
+    pub con_archivo: i64,
+    pub indexadas: i64,
+    pub pendientes: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ClipGenerationEvent {
+    Progress(crate::helpers::scan_service::ClipGenerationProgress),
+    Finished {
+        result: Result<(u32, Vec<String>), String>,
+        stats: ClipProgressStats,
+    },
+}
 
 /// Construye y devuelve la ventana principal de la aplicación.
 pub fn build(app: &adw::Application, pool: SqlitePool) -> adw::ApplicationWindow {
@@ -81,11 +99,10 @@ pub fn build(app: &adw::Application, pool: SqlitePool) -> adw::ApplicationWindow
     // Conectar "nueva tab" desde el overview → crea una pestaña selector
     let pool_for_overview = pool.clone();
     tab_overview.connect_create_tab(glib::clone!(
-        #[weak] tab_view,
+        #[weak]
+        tab_view,
         #[upgrade_or_panic]
-        move |_| {
-            add_tab(&tab_view, TabKind::Selector(pool_for_overview.clone()))
-        }
+        move |_| { add_tab(&tab_view, TabKind::Selector(pool_for_overview.clone())) }
     ));
 
     // ToastOverlay: envuelve el contenido para poder mostrar notificaciones
@@ -146,9 +163,12 @@ fn setup_download_covers_action(
             tokio::runtime::Handle::current(),
             async move {
                 // 1. Enlazar en BD las portadas que ya están en disco
-                let link_result = crate::helpers::scan_service::relink_covers_from_disk(&pool_task).await;
+                let link_result =
+                    crate::helpers::scan_service::relink_covers_from_disk(&pool_task).await;
                 // 2. Generar embeddings CLIP para todas las que tienen ruta_local
-                let clip_result = crate::helpers::scan_service::generate_missing_clip_embeddings(&pool_task).await;
+                let clip_result =
+                    crate::helpers::scan_service::generate_missing_clip_embeddings(&pool_task)
+                        .await;
                 (link_result, clip_result)
             },
             move |(link_result, clip_result)| {
@@ -158,13 +178,25 @@ fn setup_download_covers_action(
 
                 if let Some(overlay) = overlay_done.upgrade() {
                     let msg = match (link_result, clip_result) {
-                        (Ok((0, _)), Ok((0, _))) => "No se encontraron portadas nuevas en disco".to_string(),
+                        (Ok((0, _)), Ok((0, _))) => {
+                            "No se encontraron portadas nuevas en disco".to_string()
+                        }
                         (Ok((lk, _)), Ok((cl, errs))) => {
                             let mut parts = Vec::new();
-                            if lk > 0 { parts.push(format!("{} portadas enlazadas desde disco", lk)); }
-                            if cl > 0 { parts.push(format!("{} embeddings CLIP generados", cl)); }
-                            if !errs.is_empty() { parts.push(format!("{} errores (ver log)", errs.len())); }
-                            if parts.is_empty() { "Todo ya estaba indexado".to_string() } else { parts.join(", ") }
+                            if lk > 0 {
+                                parts.push(format!("{} portadas enlazadas desde disco", lk));
+                            }
+                            if cl > 0 {
+                                parts.push(format!("{} embeddings CLIP generados", cl));
+                            }
+                            if !errs.is_empty() {
+                                parts.push(format!("{} errores (ver log)", errs.len()));
+                            }
+                            if parts.is_empty() {
+                                "Todo ya estaba indexado".to_string()
+                            } else {
+                                parts.join(", ")
+                            }
                         }
                         (Err(e), _) => format!("Error escaneando disco: {e}"),
                         (_, Err(e)) => format!("Error generando CLIP: {e}"),
@@ -207,9 +239,17 @@ fn setup_generate_clip_action(
         let pool_clone = pool.clone();
 
         dialog.connect_response(None, move |_d, response| {
-            if response == "cancel" { return; }
+            if response == "cancel" {
+                return;
+            }
             let solo_faltantes = response != "all";
-            run_clip_generation(None, solo_faltantes, pool_clone.clone(), Some(overlay_clone.clone()));
+            run_clip_generation(
+                None,
+                solo_faltantes,
+                pool_clone.clone(),
+                Some(overlay_clone.clone()),
+                None,
+            );
         });
 
         dialog.present(win_weak.upgrade().as_ref());
@@ -228,39 +268,88 @@ pub(crate) fn run_clip_generation(
     solo_faltantes: bool,
     pool: SqlitePool,
     overlay_weak: Option<glib::WeakRef<adw::ToastOverlay>>,
+    event_tx: Option<Sender<ClipGenerationEvent>>,
 ) {
     if let Some(ref ow) = overlay_weak {
         if let Some(overlay) = ow.upgrade() {
-            let msg = if solo_faltantes { "Indexando portadas faltantes…" } else { "Reindexando todas las portadas…" };
+            let msg = if solo_faltantes {
+                "Indexando portadas faltantes…"
+            } else {
+                "Reindexando todas las portadas…"
+            };
             overlay.add_toast(adw::Toast::builder().title(msg).timeout(3).build());
         }
     }
+
+    let event_tx_for_task = event_tx.clone();
+    let event_tx_for_done = event_tx.clone();
 
     crate::ui::run_in_background(
         tokio::runtime::Handle::current(),
         async move {
             let info_repo = crate::repositories::ComicbookInfoRepository::new(&pool);
-            let stats = info_repo.count_clip_index_stats().await.unwrap_or((0, 0, 0, 0));
+            let stats = info_repo
+                .count_clip_index_stats(volume_id)
+                .await
+                .unwrap_or((0, 0, 0, 0));
             tracing::info!(
                 "CLIP índice — total covers: {}, con archivo: {}, indexadas: {}, pendientes: {}",
-                stats.0, stats.1, stats.2, stats.3
+                stats.0,
+                stats.1,
+                stats.2,
+                stats.3
             );
+            let progress_tx = event_tx_for_task.as_ref().map(|tx| {
+                let ui_tx = tx.clone();
+                let (progress_tx, progress_rx) = std::sync::mpsc::channel::<
+                    crate::helpers::scan_service::ClipGenerationProgress,
+                >();
+                std::thread::spawn(move || {
+                    while let Ok(progress) = progress_rx.recv() {
+                        let _ = ui_tx.send(ClipGenerationEvent::Progress(progress));
+                    }
+                });
+                progress_tx
+            });
             let result = crate::helpers::scan_service::generate_clip_embeddings(
-                &pool, volume_id, solo_faltantes,
-            ).await;
+                &pool,
+                volume_id,
+                solo_faltantes,
+                progress_tx,
+            )
+            .await;
             (result, stats)
         },
         move |(result, stats)| {
+            let stats = ClipProgressStats {
+                total: stats.0,
+                con_archivo: stats.1,
+                indexadas: stats.2,
+                pendientes: stats.3,
+            };
+            if let Some(tx) = &event_tx_for_done {
+                let _ = tx.send(ClipGenerationEvent::Finished {
+                    result: result
+                        .as_ref()
+                        .map(|(generated, errs)| (*generated, errs.clone()))
+                        .map_err(|e| e.to_string()),
+                    stats: stats.clone(),
+                });
+            }
+
             let Some(ref ow) = overlay_weak else { return };
             let Some(overlay) = ow.upgrade() else { return };
-            let (total, con_archivo, indexadas, pendientes) = stats;
+            let total = stats.total;
+            let con_archivo = stats.con_archivo;
+            let indexadas = stats.indexadas;
+            let pendientes = stats.pendientes;
             let msg = match result {
-                Ok((0, _)) if con_archivo == 0 => format!(
-                    "Sin portadas descargadas ({total} issues en BD)."
-                ),
-                Ok((0, _)) => format!(
-                    "{indexadas} portadas ya indexadas de {con_archivo} con archivo local"
-                ),
+                Ok((0, _)) if con_archivo == 0 => {
+                    format!("Sin portadas descargadas ({total} issues en BD).")
+                }
+                Ok((0, _)) => {
+                    format!("{indexadas} portadas ya indexadas de {con_archivo} con archivo local")
+                }
                 Ok((n, errs)) if errs.is_empty() => format!(
                     "CLIP: {n} portadas indexadas ({total} total, {} pendientes)",
                     pendientes.saturating_sub(n as i64)
@@ -401,11 +490,27 @@ fn build_tab_type_popover(tab_view: &adw::TabView, pool: &SqlitePool) -> gtk::Po
         .build();
 
     let kinds: Vec<(&str, &str, TabKind)> = vec![
-        ("Comics",      "image-x-generic-symbolic", TabKind::Comics(pool.clone())),
-        ("Series",      "accessories-dictionary-symbolic", TabKind::Volumes(pool.clone())),
+        (
+            "Comics",
+            "image-x-generic-symbolic",
+            TabKind::Comics(pool.clone()),
+        ),
+        (
+            "Series",
+            "accessories-dictionary-symbolic",
+            TabKind::Volumes(pool.clone()),
+        ),
         ("Editoriales", "building-symbolic", TabKind::Publishers),
-        ("Descargas",   "folder-download-symbolic",  TabKind::Downloads(pool.clone())),
-        ("ComicVine",   "web-browser-symbolic",      TabKind::ComicVineSearch(pool.clone())),
+        (
+            "Descargas",
+            "folder-download-symbolic",
+            TabKind::Downloads(pool.clone()),
+        ),
+        (
+            "ComicVine",
+            "web-browser-symbolic",
+            TabKind::ComicVineSearch(pool.clone()),
+        ),
     ];
 
     for (label_text, icon, kind) in kinds {
@@ -413,12 +518,7 @@ fn build_tab_type_popover(tab_view: &adw::TabView, pool: &SqlitePool) -> gtk::Po
             .title(label_text)
             .activatable(true)
             .build();
-        row.add_prefix(
-            &gtk::Image::builder()
-                .icon_name(icon)
-                .pixel_size(20)
-                .build(),
-        );
+        row.add_prefix(&gtk::Image::builder().icon_name(icon).pixel_size(20).build());
 
         let tv = tab_view.clone();
         let popover_ref = popover.downgrade();
@@ -453,11 +553,27 @@ fn build_selector_page(tab_view: &adw::TabView, pool: SqlitePool) -> gtk::Widget
         .build();
 
     let kinds: Vec<(&str, &str, TabKind)> = vec![
-        ("Comics",      "image-x-generic-symbolic", TabKind::Comics(pool.clone())),
-        ("Series",      "accessories-dictionary-symbolic", TabKind::Volumes(pool.clone())),
+        (
+            "Comics",
+            "image-x-generic-symbolic",
+            TabKind::Comics(pool.clone()),
+        ),
+        (
+            "Series",
+            "accessories-dictionary-symbolic",
+            TabKind::Volumes(pool.clone()),
+        ),
         ("Editoriales", "building-symbolic", TabKind::Publishers),
-        ("Descargas",   "folder-download-symbolic",  TabKind::Downloads(pool.clone())),
-        ("ComicVine",   "web-browser-symbolic",      TabKind::ComicVineSearch(pool.clone())),
+        (
+            "Descargas",
+            "folder-download-symbolic",
+            TabKind::Downloads(pool.clone()),
+        ),
+        (
+            "ComicVine",
+            "web-browser-symbolic",
+            TabKind::ComicVineSearch(pool.clone()),
+        ),
     ];
 
     for (label_text, icon, kind) in kinds {
@@ -505,7 +621,10 @@ fn build_menu() -> gio::MenuModel {
     menu.append(Some("Escanear directorios"), Some("app.scan"));
     menu.append_section(None, &{
         let section = gio::Menu::new();
-        section.append(Some("Indexar portadas existentes"), Some("win.download-covers"));
+        section.append(
+            Some("Indexar portadas existentes"),
+            Some("win.download-covers"),
+        );
         section.append(Some("Generar embeddings CLIP"), Some("win.generate-clip"));
         section.upcast::<gio::MenuModel>()
     });
@@ -540,12 +659,10 @@ fn setup_shortcuts(
             }
             glib::Propagation::Stop
         });
-        controller.add_shortcut(
-            gtk::Shortcut::new(
-                Some(gtk::ShortcutTrigger::parse_string("<Control>w").unwrap()),
-                Some(action),
-            )
-        );
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(gtk::ShortcutTrigger::parse_string("<Control>w").unwrap()),
+            Some(action),
+        ));
     }
 
     // Ctrl+Tab — siguiente tab
@@ -555,12 +672,10 @@ fn setup_shortcuts(
             tv.select_next_page();
             glib::Propagation::Stop
         });
-        controller.add_shortcut(
-            gtk::Shortcut::new(
-                Some(gtk::ShortcutTrigger::parse_string("<Control>Tab").unwrap()),
-                Some(action),
-            )
-        );
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(gtk::ShortcutTrigger::parse_string("<Control>Tab").unwrap()),
+            Some(action),
+        ));
     }
 
     // Ctrl+Shift+Tab — pestaña anterior
@@ -570,12 +685,10 @@ fn setup_shortcuts(
             tv.select_previous_page();
             glib::Propagation::Stop
         });
-        controller.add_shortcut(
-            gtk::Shortcut::new(
-                Some(gtk::ShortcutTrigger::parse_string("<Control><Shift>Tab").unwrap()),
-                Some(action),
-            )
-        );
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(gtk::ShortcutTrigger::parse_string("<Control><Shift>Tab").unwrap()),
+            Some(action),
+        ));
     }
 
     // Ctrl+Shift+O — abrir overview de tabs
@@ -585,12 +698,10 @@ fn setup_shortcuts(
             ov.set_open(!ov.is_open());
             glib::Propagation::Stop
         });
-        controller.add_shortcut(
-            gtk::Shortcut::new(
-                Some(gtk::ShortcutTrigger::parse_string("<Control><Shift>o").unwrap()),
-                Some(action),
-            )
-        );
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(gtk::ShortcutTrigger::parse_string("<Control><Shift>o").unwrap()),
+            Some(action),
+        ));
     }
 
     // Escape — cerrar tab actual (útil para volver desde detalles)
@@ -605,12 +716,10 @@ fn setup_shortcuts(
             }
             glib::Propagation::Stop
         });
-        controller.add_shortcut(
-            gtk::Shortcut::new(
-                Some(gtk::ShortcutTrigger::parse_string("Escape").unwrap()),
-                Some(action),
-            )
-        );
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(gtk::ShortcutTrigger::parse_string("Escape").unwrap()),
+            Some(action),
+        ));
     }
 
     win.add_controller(controller);

@@ -1,13 +1,14 @@
 use std::cell::{Cell, RefCell};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
+use adw::prelude::*;
 use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
-use adw::prelude::*;
 
 use crate::helpers::{extraction_registry, extractor};
 use crate::ui::run_in_background;
@@ -34,29 +35,43 @@ async fn make_thumbnail(
     comic_path: String,
     page_name: String,
     pages_dir: PathBuf,
+    thumb_path: PathBuf,
 ) -> anyhow::Result<ThumbPixels> {
     let cached = page_path_in(&page_name, &pages_dir);
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<ThumbPixels> {
-        let img = if cached.exists() {
-            image::open(&cached)?
+        let rgb = if thumb_path.exists() {
+            image::open(&thumb_path)?.into_rgb8()
         } else {
-            let bytes = extractor::extract_page_to_memory(&comic_path, &page_name)?;
-            let img = image::load_from_memory(&bytes)?;
-            drop(bytes); // liberar bytes comprimidos antes de escalar
-            img
+            let img = if cached.exists() {
+                image::open(&cached)?
+            } else {
+                let bytes = extractor::extract_page_to_memory(&comic_path, &page_name)?;
+                let img = image::load_from_memory(&bytes)?;
+                drop(bytes); // liberar bytes comprimidos antes de escalar
+                img
+            };
+
+            let thumb = img.resize(160, u32::MAX, image::imageops::FilterType::Triangle);
+            drop(img); // liberar imagen completa (~24-80 MB) antes de convertir
+
+            if let Some(parent) = thumb_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg)?;
+            thumb.into_rgb8()
         };
-
-        let thumb = img.resize(160, u32::MAX, image::imageops::FilterType::Triangle);
-        drop(img); // liberar imagen completa (~24-80 MB) antes de convertir
-
-        let rgb = thumb.into_rgb8();
         let width = rgb.width() as i32;
         let height = rgb.height() as i32;
         let rowstride = width * 3;
         let data = rgb.into_raw();
 
-        Ok(ThumbPixels { data, width, height, rowstride })
+        Ok(ThumbPixels {
+            data,
+            width,
+            height,
+            rowstride,
+        })
     })
     .await?
 }
@@ -89,6 +104,20 @@ fn page_path_in(page_name: &str, dir: &PathBuf) -> PathBuf {
             .to_string()
     };
     dir.join(file_name)
+}
+
+fn reader_thumb_dir(comic_path: &str) -> PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    comic_path.hash(&mut hasher);
+    let key = format!("{:016x}", hasher.finish());
+    crate::helpers::paths::thumbnails_dir()
+        .join("comic_pages")
+        .join("reader")
+        .join(key)
+}
+
+fn reader_thumb_path(comic_path: &str, index: usize) -> PathBuf {
+    reader_thumb_dir(comic_path).join(format!("page_{}.jpg", index))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -186,8 +215,13 @@ impl ReaderWindow {
         header.pack_start(&btn_sidebar);
 
         let nav_box = gtk::Box::builder().spacing(6).margin_start(12).build();
-        let page_entry = gtk::SpinButton::builder().numeric(true).width_chars(4).build();
-        let total_label = gtk::Label::builder().css_classes(["dim-label", "caption"]).build();
+        let page_entry = gtk::SpinButton::builder()
+            .numeric(true)
+            .width_chars(4)
+            .build();
+        let total_label = gtk::Label::builder()
+            .css_classes(["dim-label", "caption"])
+            .build();
         nav_box.append(&page_entry);
         nav_box.append(&total_label);
         header.pack_start(&nav_box);
@@ -374,11 +408,12 @@ impl ReaderWindow {
         let page_name = self.page_names.borrow()[index].clone();
         let comic_path = (*self.comic_path).clone();
         let temp_dir = self.temp_dir.clone();
+        let thumb_path = reader_thumb_path(&comic_path, index);
         let r = self.clone_ref();
 
         run_in_background(
             tokio::runtime::Handle::current(),
-            make_thumbnail(comic_path, page_name, temp_dir),
+            make_thumbnail(comic_path, page_name, temp_dir, thumb_path),
             move |res| {
                 if !r.alive.get() {
                     return;
@@ -435,9 +470,7 @@ impl ReaderWindow {
 
         run_in_background(
             tokio::runtime::Handle::current(),
-            async move {
-                extractor::extract_single_page(&comic_path, &page_name, &temp_dir)
-            },
+            async move { extractor::extract_single_page(&comic_path, &page_name, &temp_dir) },
             move |res| {
                 r.extracting.set(false);
 
@@ -496,7 +529,11 @@ impl ReaderWindow {
 
         let r_fs = r.clone_ref();
         btn_fs.connect_clicked(move |_| {
-            if r_fs.win.is_fullscreen() { r_fs.win.unfullscreen(); } else { r_fs.win.fullscreen(); }
+            if r_fs.win.is_fullscreen() {
+                r_fs.win.unfullscreen();
+            } else {
+                r_fs.win.fullscreen();
+            }
         });
 
         let r_pe = r.clone_ref();
@@ -516,29 +553,45 @@ impl ReaderWindow {
         let click_ctrl = gtk::GestureClick::new();
         click_ctrl.connect_pressed(move |_, _, x, _| {
             let width = r_click.win.width() as f64;
-            if x < width * 0.3 { r_click.prev_page(); }
-            else if x > width * 0.7 { r_click.next_page(); }
+            if x < width * 0.3 {
+                r_click.prev_page();
+            } else if x > width * 0.7 {
+                r_click.next_page();
+            }
         });
         self.image.add_controller(click_ctrl);
 
         let shortcut_ctrl = gtk::ShortcutController::new();
-        self.add_shortcut(&shortcut_ctrl, "Right|space|Page_Down", move |r| r.next_page());
-        self.add_shortcut(&shortcut_ctrl, "Left|BackSpace|Page_Up", move |r| r.prev_page());
+        self.add_shortcut(&shortcut_ctrl, "Right|space|Page_Down", move |r| {
+            r.next_page()
+        });
+        self.add_shortcut(&shortcut_ctrl, "Left|BackSpace|Page_Up", move |r| {
+            r.prev_page()
+        });
         self.add_shortcut(&shortcut_ctrl, "f|F11", move |r| {
-            if r.win.is_fullscreen() { r.win.unfullscreen(); } else { r.win.fullscreen(); }
+            if r.win.is_fullscreen() {
+                r.win.unfullscreen();
+            } else {
+                r.win.fullscreen();
+            }
         });
         self.add_shortcut(&shortcut_ctrl, "t", move |r| {
             r.sidebar.set_show_sidebar(!r.sidebar.shows_sidebar());
         });
         self.add_shortcut(&shortcut_ctrl, "Escape", move |r| {
-            if r.win.is_fullscreen() { r.win.unfullscreen(); } else { r.win.close(); }
+            if r.win.is_fullscreen() {
+                r.win.unfullscreen();
+            } else {
+                r.win.close();
+            }
         });
         self.win.add_controller(shortcut_ctrl);
 
         self.setup_menu(btn_menu);
 
         let alive_flag = self.alive.clone();
-        let base_dir = self.temp_dir
+        let base_dir = self
+            .temp_dir
             .parent()
             .unwrap_or(&self.temp_dir)
             .to_path_buf();
@@ -570,7 +623,11 @@ impl ReaderWindow {
 
             if acc > 3.0 {
                 self.scroll_accumulator.set(0.0);
-                if dy > 0.0 { self.next_page(); } else { self.prev_page(); }
+                if dy > 0.0 {
+                    self.next_page();
+                } else {
+                    self.prev_page();
+                }
                 return glib::Propagation::Stop;
             }
         }

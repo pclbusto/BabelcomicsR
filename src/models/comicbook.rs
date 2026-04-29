@@ -110,5 +110,8 @@ pub fn parse_search_query(raw: &str) -> ParsedQuery {
         }
     }
 
-    ParsedQuery { must_include, must_exclude }
+    ParsedQuery {
+        must_include,
+        must_exclude,
+    }
 }

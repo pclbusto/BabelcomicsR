@@ -204,7 +204,9 @@ impl ComicOrganizer {
         };
 
         let publisher = if volume.id_publisher > 0 {
-            PublisherRepository::new(&self.pool).get_by_id(volume.id_publisher).await?
+            PublisherRepository::new(&self.pool)
+                .get_by_id(volume.id_publisher)
+                .await?
         } else {
             None
         };
@@ -237,7 +239,11 @@ impl ComicOrganizer {
         };
 
         let relative = format!("{}/{}/{}", publisher_folder, volume_folder, filename);
-        let absolute = self.base_folder.join(&relative).to_string_lossy().to_string();
+        let absolute = self
+            .base_folder
+            .join(&relative)
+            .to_string_lossy()
+            .to_string();
         (relative, absolute)
     }
 
@@ -433,10 +439,7 @@ impl ComicOrganizer {
 
         // ¿Hay duplicados en destino?
         let target_dir = PathBuf::from(&absolute);
-        let target_dir = target_dir
-            .parent()
-            .unwrap_or(Path::new(""))
-            .to_path_buf();
+        let target_dir = target_dir.parent().unwrap_or(Path::new("")).to_path_buf();
         let existing = Self::find_existing_versions(&target_dir, &base_filename);
 
         if existing.is_empty() {
@@ -478,10 +481,7 @@ impl ComicOrganizer {
     }
 
     /// Segundo pase: detecta planes que apuntan al mismo destino y les asigna versiones.
-    async fn resolve_duplicate_plans(
-        &self,
-        plans: &mut Vec<ComicOrganizationPlan>,
-    ) -> Result<()> {
+    async fn resolve_duplicate_plans(&self, plans: &mut Vec<ComicOrganizationPlan>) -> Result<()> {
         // Agrupar índices por path de destino
         let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, plan) in plans.iter().enumerate() {
@@ -583,10 +583,7 @@ impl ComicOrganizer {
         }
 
         if !Path::new(&plan.current_path).exists() {
-            return Err(format!(
-                "Archivo origen no existe: {}",
-                plan.current_path
-            ));
+            return Err(format!("Archivo origen no existe: {}", plan.current_path));
         }
 
         if dry_run {

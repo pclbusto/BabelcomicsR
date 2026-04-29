@@ -1,15 +1,15 @@
+use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{self as gtk};
 use libadwaita as adw;
-use adw::prelude::*;
 use sqlx::SqlitePool;
 
-use crate::repositories::{ComicbookRepository, VolumeRepository, PublisherRepository};
+use crate::repositories::{ComicbookRepository, PublisherRepository, VolumeRepository};
 use crate::ui::run_in_background;
 
 pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
     let popover = gtk::Popover::new();
-    
+
     let main_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -60,9 +60,27 @@ pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
 
     // Carga de datos inicial y cada vez que el popover se hace visible
     let p = pool.clone();
-    let rows = (total_c.clone(), cat_c.clone(), uncat_c.clone(), err_c.clone(), nothumb_c.clone(), total_v.clone(), comp_v.clone(), total_p.clone());
+    let rows = (
+        total_c.clone(),
+        cat_c.clone(),
+        uncat_c.clone(),
+        err_c.clone(),
+        nothumb_c.clone(),
+        total_v.clone(),
+        comp_v.clone(),
+        total_p.clone(),
+    );
 
-    type StatRows = (adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow, adw::ActionRow);
+    type StatRows = (
+        adw::ActionRow,
+        adw::ActionRow,
+        adw::ActionRow,
+        adw::ActionRow,
+        adw::ActionRow,
+        adw::ActionRow,
+        adw::ActionRow,
+        adw::ActionRow,
+    );
 
     let update_stats = move |p_pool: SqlitePool, p_rows: StatRows| {
         let (tc_row, cc_row, uc_row, ec_row, nt_row, tv_row, cv_row, tp_row) = p_rows;
@@ -73,13 +91,13 @@ pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
                 let repo_v = VolumeRepository::new(&p_pool);
                 let repo_p = PublisherRepository::new(&p_pool);
 
-                let t_c  = repo_c.count().await.unwrap_or(0);
-                let u_c  = repo_c.count_uncatalogued().await.unwrap_or(0);
-                let e_c  = repo_c.count_with_errors().await.unwrap_or(0);
+                let t_c = repo_c.count().await.unwrap_or(0);
+                let u_c = repo_c.count_uncatalogued().await.unwrap_or(0);
+                let e_c = repo_c.count_with_errors().await.unwrap_or(0);
                 let nt_c = repo_c.count_without_thumbnail().await.unwrap_or(0);
-                let t_v  = repo_v.count().await.unwrap_or(0);
-                let c_v  = repo_v.count_completed().await.unwrap_or(0);
-                let t_p  = repo_p.count().await.unwrap_or(0);
+                let t_v = repo_v.count().await.unwrap_or(0);
+                let c_v = repo_v.count_completed().await.unwrap_or(0);
+                let t_p = repo_p.count().await.unwrap_or(0);
 
                 (t_c, t_c - u_c, u_c, e_c, nt_c, t_v, c_v, t_p)
             },
@@ -92,14 +110,14 @@ pub fn build_popover(pool: SqlitePool) -> gtk::Popover {
                 tv_row.set_subtitle(&tv.to_string());
                 cv_row.set_subtitle(&cv.to_string());
                 tp_row.set_subtitle(&tp.to_string());
-            }
+            },
         );
     };
 
     let update_stats_initial = update_stats.clone();
     let p_initial = p.clone();
     let rows_initial = rows.clone();
-    
+
     // Al abrir el popover, refrescar datos
     popover.connect_visible_notify(move |pop| {
         if pop.get_visible() {
@@ -125,11 +143,13 @@ fn create_stat_row(title: &str, initial_value: &str, icon_name: &str) -> adw::Ac
         .title(title)
         .subtitle(initial_value)
         .build();
-    
-    row.add_prefix(&gtk::Image::builder()
-        .icon_name(icon_name)
-        .pixel_size(16)
-        .build());
-    
+
+    row.add_prefix(
+        &gtk::Image::builder()
+            .icon_name(icon_name)
+            .pixel_size(16)
+            .build(),
+    );
+
     row
 }

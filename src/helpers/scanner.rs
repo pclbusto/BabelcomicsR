@@ -52,9 +52,9 @@ impl ComicFormat {
         {
             Some("cbz") | Some("zip") => Self::Cbz,
             Some("cbr") | Some("rar") => Self::Cbr,
-            Some("cb7") | Some("7z")  => Self::Cb7,
-            Some("pdf")               => Self::Pdf,
-            _                         => Self::Unknown,
+            Some("cb7") | Some("7z") => Self::Cb7,
+            Some("pdf") => Self::Pdf,
+            _ => Self::Unknown,
         }
     }
 }

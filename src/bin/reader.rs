@@ -1,10 +1,10 @@
+use adw::prelude::*;
 use anyhow::Result;
+use babelcomics::helpers::paths;
+use babelcomics::ui::reader::ReaderWindow;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio};
 use libadwaita as adw;
-use adw::prelude::*;
-use babelcomics::ui::reader::ReaderWindow;
-use babelcomics::helpers::paths;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
 
     app.connect_activate(move |app| {
         let args: Vec<String> = std::env::args().collect();
-        
+
         // El primer argumento es el ejecutable, el segundo es el path al comic
         if args.len() > 1 {
             let path = &args[1];

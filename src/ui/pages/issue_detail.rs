@@ -1,20 +1,26 @@
+use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
-use adw::prelude::*;
 use sqlx::SqlitePool;
 
-use crate::models::{ComicbookInfo, ComicbookInfoCover, Comicbook};
-use crate::repositories::{ComicbookInfoRepository, ComicbookRepository, SetupRepository, VolumeRepository};
-use crate::ui::run_in_background;
 use crate::helpers::thumbnail::CardSize;
+use crate::models::{Comicbook, ComicbookInfo, ComicbookInfoCover};
+use crate::repositories::{
+    ComicbookInfoRepository, ComicbookRepository, SetupRepository, VolumeRepository,
+};
+use crate::ui::run_in_background;
 
 /// Actualiza el título de la pestaña con el número y título del issue.
 pub fn setup_tab_title(issue_info_id: i64, pool: SqlitePool, page: glib::WeakRef<adw::TabPage>) {
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            ComicbookInfoRepository::new(&pool).get_by_id(issue_info_id).await.ok().flatten()
+            ComicbookInfoRepository::new(&pool)
+                .get_by_id(issue_info_id)
+                .await
+                .ok()
+                .flatten()
         },
         move |info_opt| {
             let Some(page) = page.upgrade() else { return };
@@ -55,15 +61,25 @@ pub fn build(issue_info_id: i64, pool: SqlitePool) -> gtk::Widget {
             let repo = ComicbookInfoRepository::new(&pool_done);
             let info = repo.get_by_id(issue_info_id).await.ok().flatten()?;
             let covers = repo.get_covers(issue_info_id).await.unwrap_or_default();
-            
+
             let vol_name = if let Some(vid) = info.id_volume {
                 VolumeRepository::new(&pool_done)
-                    .get_by_id(vid).await.ok().flatten().map(|v| v.nombre)
-            } else { None }.unwrap_or_default();
+                    .get_by_id(vid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|v| v.nombre)
+            } else {
+                None
+            }
+            .unwrap_or_default();
 
-            let setup = SetupRepository::new(&pool_done).get().await.unwrap_or_default();
+            let setup = SetupRepository::new(&pool_done)
+                .get()
+                .await
+                .unwrap_or_default();
             let card_size = CardSize::from_db(setup.thumbnail_size);
-            
+
             // También buscamos si tenemos archivos físicos para este issue
             let physical = ComicbookRepository::new(&pool_done)
                 .get_by_info_id(issue_info_id)
@@ -74,11 +90,12 @@ pub fn build(issue_info_id: i64, pool: SqlitePool) -> gtk::Widget {
         },
         move |res| {
             if let Some((info, covers, physical, card_size, vol_name)) = res {
-                let content = build_content(info, covers, physical, card_size, pool.clone(), &vol_name);
+                let content =
+                    build_content(info, covers, physical, card_size, pool.clone(), &vol_name);
                 scroll_done.set_child(Some(&content));
                 stack_done.set_visible_child_name("content");
             }
-        }
+        },
     );
 
     stack.upcast()
@@ -164,12 +181,16 @@ fn build_content(
                         url_original.as_deref(),
                         &vol_nombre,
                         id_vol,
-                    ).await?;
-                    
+                    )
+                    .await?;
+
                     tokio::task::spawn_blocking(move || {
                         let gbytes = glib::Bytes::from_owned(bytes);
                         gtk::gdk::Texture::from_bytes(&gbytes).ok()
-                    }).await.ok().flatten()
+                    })
+                    .await
+                    .ok()
+                    .flatten()
                 },
                 move |texture_opt| {
                     if let (Some(texture), Some(container)) = (texture_opt, frame_weak.upgrade()) {
@@ -184,7 +205,7 @@ fn build_content(
                             .build();
                         container.append(&pic);
                     }
-                }
+                },
             );
         }
     }
@@ -208,38 +229,46 @@ fn build_content(
         .hexpand(true)
         .build();
 
-    info_side.append(&gtk::Label::builder()
-        .label(&format!("#{} {}", info.numero.as_deref().unwrap_or("?"), info.titulo))
-        .halign(gtk::Align::Start)
-        .css_classes(["title-1"])
-        .wrap(true)
-        .build());
+    info_side.append(
+        &gtk::Label::builder()
+            .label(&format!(
+                "#{} {}",
+                info.numero.as_deref().unwrap_or("?"),
+                info.titulo
+            ))
+            .halign(gtk::Align::Start)
+            .css_classes(["title-1"])
+            .wrap(true)
+            .build(),
+    );
 
     let details_group = adw::PreferencesGroup::builder()
         .title("Detalles del Issue")
         .build();
 
     if let Some(cv_id) = info.id_comicvine {
-        details_group.add(&adw::ActionRow::builder()
-            .title("ID ComicVine")
-            .subtitle(cv_id.to_string())
-            .build());
+        details_group.add(
+            &adw::ActionRow::builder()
+                .title("ID ComicVine")
+                .subtitle(cv_id.to_string())
+                .build(),
+        );
     }
 
     if let Some(rating) = info.calificacion {
         let stars = "★".repeat(rating.round() as usize);
-        details_group.add(&adw::ActionRow::builder()
-            .title("Calificación")
-            .subtitle(stars)
-            .build());
+        details_group.add(
+            &adw::ActionRow::builder()
+                .title("Calificación")
+                .subtitle(stars)
+                .build(),
+        );
     }
 
     info_side.append(&details_group);
 
     if let Some(ref resumen) = info.resumen {
-        let resumen_group = adw::PreferencesGroup::builder()
-            .title("Resumen")
-            .build();
+        let resumen_group = adw::PreferencesGroup::builder().title("Resumen").build();
         let label = gtk::Label::builder()
             .label(resumen)
             .wrap(true)
@@ -273,17 +302,19 @@ fn build_content(
                 .subtitle(glib::markup_escape_text(&cb.path).as_str())
                 .activatable(true)
                 .build();
-            
+
             let btn_read = gtk::Button::builder()
                 .icon_name("book-open-symbolic")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat"])
                 .tooltip_text("Leer este archivo")
                 .build();
-            
+
             let path_clone = cb.path.clone();
             btn_read.connect_clicked(move |_| {
-                let Some(app) = gio::Application::default() else { return };
+                let Some(app) = gio::Application::default() else {
+                    return;
+                };
                 if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
                     crate::ui::reader::ReaderWindow::open(adw_app, &path_clone);
                 }

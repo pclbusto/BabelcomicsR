@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(i64)]
 pub enum TipoPagina {
-    Story       = 0,
-    FrontCover  = 1,
-    BackCover   = 2,
-    InnerCover  = 3,
+    Story = 0,
+    FrontCover = 1,
+    BackCover = 2,
+    InnerCover = 3,
     Advertisement = 4,
-    Other       = 5,
+    Other = 5,
 }
 
 impl TipoPagina {
@@ -31,38 +31,38 @@ impl TipoPagina {
     /// Nombre legible para mostrar en la UI
     pub fn label(self) -> &'static str {
         match self {
-            TipoPagina::Story        => "Historia",
-            TipoPagina::FrontCover   => "Portada",
-            TipoPagina::BackCover    => "Contraportada",
-            TipoPagina::InnerCover   => "Portada interior",
+            TipoPagina::Story => "Historia",
+            TipoPagina::FrontCover => "Portada",
+            TipoPagina::BackCover => "Contraportada",
+            TipoPagina::InnerCover => "Portada interior",
             TipoPagina::Advertisement => "Publicidad",
-            TipoPagina::Other        => "Otro",
+            TipoPagina::Other => "Otro",
         }
     }
 
     /// Parsea el string de ComicInfo.xml al enum
     pub fn from_comicinfo_str(s: &str) -> Self {
         match s {
-            "FrontCover"    => TipoPagina::FrontCover,
-            "BackCover"     => TipoPagina::BackCover,
-            "InnerCover"    => TipoPagina::InnerCover,
+            "FrontCover" => TipoPagina::FrontCover,
+            "BackCover" => TipoPagina::BackCover,
+            "InnerCover" => TipoPagina::InnerCover,
             "Advertisement" => TipoPagina::Advertisement,
-            "Story"         => TipoPagina::Story,
-            _               => TipoPagina::Other,
+            "Story" => TipoPagina::Story,
+            _ => TipoPagina::Other,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ComicbookDetail {
-    pub id_detail:     i64,
-    pub comicbook_id:  i64,
+    pub id_detail: i64,
+    pub comicbook_id: i64,
     #[sqlx(rename = "indicePagina")]
     pub indice_pagina: i64,
     #[sqlx(rename = "ordenPagina")]
-    pub orden_pagina:  i64,
+    pub orden_pagina: i64,
     #[sqlx(rename = "tipoPagina")]
-    pub tipo_pagina:   i64,
+    pub tipo_pagina: i64,
     pub nombre_pagina: Option<String>,
 }
 
@@ -74,9 +74,9 @@ impl ComicbookDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewComicbookDetail {
-    pub comicbook_id:  i64,
+    pub comicbook_id: i64,
     pub indice_pagina: i64,
-    pub orden_pagina:  i64,
-    pub tipo_pagina:   TipoPagina,
+    pub orden_pagina: i64,
+    pub tipo_pagina: TipoPagina,
     pub nombre_pagina: Option<String>,
 }

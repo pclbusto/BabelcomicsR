@@ -1,6 +1,6 @@
 use anyhow::Result;
-use sqlx::{Row, SqlitePool};
 use futures::StreamExt;
+use sqlx::{Row, SqlitePool};
 
 use super::clip_embedder;
 
@@ -44,7 +44,10 @@ pub async fn suggest_for_comic(
                 }
             }
         }
-        Err(anyhow::anyhow!("No se encontró thumbnail para el comic {}", comic_id))
+        Err(anyhow::anyhow!(
+            "No se encontró thumbnail para el comic {}",
+            comic_id
+        ))
     })
     .await??;
 
@@ -149,29 +152,33 @@ pub async fn suggest_best_matches(
 ) -> Result<Vec<UnifiedSuggestion>> {
     // 1. Intentar CLIP (ComicVine index)
     let clip_res = suggest_for_comic_clip(pool, comic_id, max_results).await;
-    
+
     if let Ok(matches) = clip_res {
         if !matches.is_empty() {
-            return Ok(matches.into_iter().map(|m| UnifiedSuggestion {
-                id_comicbook_info: m.id_comicbook_info,
-                titulo: m.titulo,
-                numero: m.numero,
-                id_volume: m.id_volume,
-                nombre_volume: m.nombre_volume,
-                similarity: m.similarity,
-                method: SuggestionMethod::Clip,
-                ruta_cover: m.ruta_cover,
-                url_original: m.url_original,
-                id_comicvine: m.id_comicvine,
-            }).collect());
+            return Ok(matches
+                .into_iter()
+                .map(|m| UnifiedSuggestion {
+                    id_comicbook_info: m.id_comicbook_info,
+                    titulo: m.titulo,
+                    numero: m.numero,
+                    id_volume: m.id_volume,
+                    nombre_volume: m.nombre_volume,
+                    similarity: m.similarity,
+                    method: SuggestionMethod::Clip,
+                    ruta_cover: m.ruta_cover,
+                    url_original: m.url_original,
+                    id_comicvine: m.id_comicvine,
+                })
+                .collect());
         }
     }
 
     // 2. Fallback a dHash (Biblioteca local)
     let hash_res = suggest_for_comic(pool, comic_id, max_results).await;
     match hash_res {
-        Ok(matches) => {
-            Ok(matches.into_iter().map(|m| UnifiedSuggestion {
+        Ok(matches) => Ok(matches
+            .into_iter()
+            .map(|m| UnifiedSuggestion {
                 id_comicbook_info: m.id_comicbook_info,
                 titulo: m.titulo,
                 numero: m.numero,
@@ -182,8 +189,8 @@ pub async fn suggest_best_matches(
                 ruta_cover: m.ruta_cover,
                 url_original: m.url_original,
                 id_comicvine: None,
-            }).collect())
-        }
+            })
+            .collect()),
         Err(_) => Ok(Vec::new()),
     }
 }
@@ -232,7 +239,10 @@ pub async fn suggest_for_comic_clip(
     let target_emb = match target_emb {
         Some(e) => e,
         None => {
-            anyhow::bail!("No se pudo obtener embedding CLIP para el cómic {}. ¿Tiene portada?", comic_id);
+            anyhow::bail!(
+                "No se pudo obtener embedding CLIP para el cómic {}. ¿Tiene portada?",
+                comic_id
+            );
         }
     };
 
@@ -261,7 +271,9 @@ pub async fn suggest_for_comic_clip(
     let results = tokio::task::spawn_blocking(move || -> Vec<(i64, f32)> {
         let mut scored: Vec<(i64, f32)> = indexed
             .into_iter()
-            .map(|(info_id, emb): (i64, Vec<f32>)| (info_id, clip_embedder::cosine_similarity(&target_emb, &emb)))
+            .map(|(info_id, emb): (i64, Vec<f32>)| {
+                (info_id, clip_embedder::cosine_similarity(&target_emb, &emb))
+            })
             .collect();
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -310,20 +322,23 @@ pub async fn suggest_for_comic_clip(
     }
 
     let rows = query.fetch_all(pool).await?;
-    let mut enriched: Vec<ClipSuggestionResult> = rows.into_iter().map(|r| {
-        let id: i64 = r.get(0);
-        ClipSuggestionResult {
-            id_comicbook_info: id,
-            titulo: r.get(1),
-            numero: r.get(2),
-            id_volume: r.get(3),
-            nombre_volume: r.get(4),
-            similarity: similarity_map.get(&id).copied().unwrap_or(0.0),
-            ruta_cover: r.get(5),
-            id_comicvine: r.get(6),
-            url_original: r.get(7),
-        }
-    }).collect();
+    let mut enriched: Vec<ClipSuggestionResult> = rows
+        .into_iter()
+        .map(|r| {
+            let id: i64 = r.get(0);
+            ClipSuggestionResult {
+                id_comicbook_info: id,
+                titulo: r.get(1),
+                numero: r.get(2),
+                id_volume: r.get(3),
+                nombre_volume: r.get(4),
+                similarity: similarity_map.get(&id).copied().unwrap_or(0.0),
+                ruta_cover: r.get(5),
+                id_comicvine: r.get(6),
+                url_original: r.get(7),
+            }
+        })
+        .collect();
 
     enriched.sort_by(|a, b| {
         b.similarity
@@ -338,8 +353,8 @@ async fn get_or_compute_comic_embedding(
     pool: &SqlitePool,
     comic_id: i64,
 ) -> Result<Option<Vec<f32>>> {
-    use crate::repositories::ComicbookRepository;
     use crate::helpers::thumbnail::CardSize;
+    use crate::repositories::ComicbookRepository;
 
     let repo = ComicbookRepository::new(pool);
 

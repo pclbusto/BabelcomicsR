@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use image::{imageops::FilterType, ImageFormat};
+use image::{ImageFormat, imageops::FilterType};
 
 /// Los tres tamaños de card soportados por el sistema.
 /// Cada variante define las dimensiones exactas de la card en la UI
@@ -17,9 +17,9 @@ impl CardSize {
     /// Dimensiones (ancho, alto) en píxeles — iguales para card y thumbnail.
     pub fn dims(self) -> (u32, u32) {
         match self {
-            CardSize::Small  => (160, 220),
+            CardSize::Small => (160, 220),
             CardSize::Medium => (240, 320),
-            CardSize::Large  => (320, 430),
+            CardSize::Large => (320, 430),
         }
     }
 }
@@ -43,9 +43,9 @@ impl CardSize {
 
     pub fn to_db(self) -> i64 {
         match self {
-            CardSize::Small  => 0,
+            CardSize::Small => 0,
             CardSize::Medium => 1,
-            CardSize::Large  => 2,
+            CardSize::Large => 2,
         }
     }
 
@@ -65,9 +65,9 @@ impl CardSize {
     /// Subdirectorio usado para aislar thumbnails por tamaño.
     pub fn dir_name(self) -> &'static str {
         match self {
-            CardSize::Small  => "small",
+            CardSize::Small => "small",
             CardSize::Medium => "medium",
-            CardSize::Large  => "large",
+            CardSize::Large => "large",
         }
     }
 }
@@ -83,7 +83,7 @@ pub fn generate_all_thumbnails(image_bytes: &[u8], id_comicbook: i64) -> Result<
         // Forzamos que la altura sea exacta (h) permitiendo que el ancho crezca libremente.
         // Esto evita que las portadas apaisadas (landscape) queden más bajas que las verticales.
         let thumbnail = img.resize(u32::MAX, h, FilterType::Lanczos3);
-        
+
         let output_path = crate::helpers::paths::comic_thumbnail_path(id_comicbook, size);
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -91,7 +91,13 @@ pub fn generate_all_thumbnails(image_bytes: &[u8], id_comicbook: i64) -> Result<
 
         thumbnail
             .save_with_format(&output_path, ImageFormat::Jpeg)
-            .with_context(|| format!("No se pudo guardar thumbnail {} en: {}", size.dir_name(), output_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "No se pudo guardar thumbnail {} en: {}",
+                    size.dir_name(),
+                    output_path.display()
+                )
+            })?;
     }
 
     Ok(())
@@ -101,8 +107,7 @@ pub fn generate_all_thumbnails(image_bytes: &[u8], id_comicbook: i64) -> Result<
 /// La imagen se escala para tener exactamente la altura de `size`, manteniendo
 /// el aspecto original. Siempre se guarda como JPEG.
 pub fn generate_thumbnail(image_bytes: &[u8], output_path: &Path, size: CardSize) -> Result<()> {
-    let img = image::load_from_memory(image_bytes)
-        .context("No se pudo decodificar la imagen")?;
+    let img = image::load_from_memory(image_bytes).context("No se pudo decodificar la imagen")?;
 
     let (_, h) = size.dims();
     let thumbnail = img.resize(u32::MAX, h, FilterType::Lanczos3);

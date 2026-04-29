@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::{sqlite::SqlitePoolOptions, Row};
+use sqlx::{Row, sqlite::SqlitePoolOptions};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,8 +21,10 @@ async fn main() -> Result<()> {
         .max_connections(1)
         .connect(&format!("sqlite://{}?mode=rwc", new_db_path))
         .await?;
-    
-    sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool_new).await?;
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&pool_new)
+        .await?;
 
     println!("📦 Inicializando esquema de Rust...");
     sqlx::migrate!("./migrations").run(&pool_new).await?;
@@ -34,8 +36,11 @@ async fn main() -> Result<()> {
 
     // --- MIGRACIÓN: PUBLISHERS ---
     println!("📊 Migrando Publishers...");
-    let old_publishers = sqlx::query("SELECT id_publisher, nombre, descripcion, id_comicvine, url_logo FROM publishers")
-        .fetch_all(&pool_old).await?;
+    let old_publishers = sqlx::query(
+        "SELECT id_publisher, nombre, descripcion, id_comicvine, url_logo FROM publishers",
+    )
+    .fetch_all(&pool_old)
+    .await?;
     for row in old_publishers {
         sqlx::query("INSERT INTO publishers (id_publisher, nombre, descripcion, id_comicvine, image_url) VALUES (?, ?, ?, ?, ?)")
             .bind(row.get::<i64, _>("id_publisher"))
@@ -89,8 +94,10 @@ async fn main() -> Result<()> {
 
     // --- MIGRACIÓN: COVERS ---
     println!("🖼️  Migrando Portadas Variantes...");
-    let old_covers = sqlx::query("SELECT id_cover, id_comicbook_info, url_imagen FROM comicbooks_info_covers")
-        .fetch_all(&pool_old).await?;
+    let old_covers =
+        sqlx::query("SELECT id_cover, id_comicbook_info, url_imagen FROM comicbooks_info_covers")
+            .fetch_all(&pool_old)
+            .await?;
     for row in old_covers {
         sqlx::query("INSERT INTO comicbooks_info_covers (id, id_comicbook_info, url_original) VALUES (?, ?, ?)")
             .bind(row.get::<i64, _>("id_cover"))
@@ -101,12 +108,15 @@ async fn main() -> Result<()> {
 
     // --- MIGRACIÓN: COMICBOOKS (Archivos) ---
     println!("💾 Migrando Archivos de Comics...");
-    let old_cb = sqlx::query("SELECT id_comicbook, path, id_comicbook_info, calidad, en_papelera FROM comicbooks")
-        .fetch_all(&pool_old).await?;
+    let old_cb = sqlx::query(
+        "SELECT id_comicbook, path, id_comicbook_info, calidad, en_papelera FROM comicbooks",
+    )
+    .fetch_all(&pool_old)
+    .await?;
     for row in old_cb {
         let info_id_raw: String = row.get(2);
         let info_id: Option<i64> = info_id_raw.parse::<i64>().ok().filter(|&id| id > 0);
-        
+
         sqlx::query("INSERT INTO comicbooks (id_comicbook, path, id_comicbook_info, calidad, en_papelera) VALUES (?, ?, ?, ?, ?)")
             .bind(row.get::<i64, _>("id_comicbook"))
             .bind(row.get::<String, _>("path"))
@@ -116,7 +126,9 @@ async fn main() -> Result<()> {
             .execute(&pool_new).await?;
     }
 
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool_new).await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool_new)
+        .await?;
 
     println!("✅ Migración completada con éxito.");
     Ok(())

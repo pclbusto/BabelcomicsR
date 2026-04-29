@@ -3,15 +3,15 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
-use adw::prelude::*;
 use sqlx::SqlitePool;
 
-use crate::ui::{self, window, reader};
+use crate::helpers::{comicvine_client::ComicVineClient, paths, scan_service, thumbnail::CardSize};
 use crate::repositories::SetupRepository;
-use crate::helpers::{paths, scan_service, thumbnail::CardSize, comicvine_client::ComicVineClient};
+use crate::ui::{self, reader, window};
 
 const APP_ID: &str = "com.github.babelcomics";
 
@@ -88,25 +88,32 @@ pub fn run(pool: SqlitePool) {
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    let setup = SetupRepository::new(&pool_boot).get().await.unwrap_or_default();
-                    
+                    let setup = SetupRepository::new(&pool_boot)
+                        .get()
+                        .await
+                        .unwrap_or_default();
+
                     // 1. Reparar thumbnails que quedaron a medias
                     let card_size = CardSize::from_db(setup.thumbnail_size);
-                    let thumb_res = scan_service::generate_missing_thumbnails(&pool_boot, card_size).await;
-                    
+                    let thumb_res =
+                        scan_service::generate_missing_thumbnails(&pool_boot, card_size).await;
+
                     // 2. Generar embeddings CLIP (solo si el usuario lo tiene activado)
                     let clip_res = if setup.clip_al_arranque {
                         Some(scan_service::generate_missing_clip_embeddings(&pool_boot).await)
                     } else {
                         None
                     };
-                    
+
                     (thumb_res, clip_res)
                 },
                 |(thumb_res, clip_res)| {
                     if let Ok(r) = thumb_res {
                         if r.covers_generated > 0 {
-                            tracing::info!("Thumbnails faltantes regenerados al arranque: {}", r.covers_generated);
+                            tracing::info!(
+                                "Thumbnails faltantes regenerados al arranque: {}",
+                                r.covers_generated
+                            );
                         }
                     }
                     if let Some(Ok((generated, _))) = clip_res {
@@ -129,7 +136,11 @@ pub fn run(pool: SqlitePool) {
     scan_service::STOP_THREADS.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn setup_actions(app: &adw::Application, pool_cell: Rc<OnceCell<SqlitePool>>, prefs_cache: Rc<OnceCell<adw::PreferencesDialog>>) {
+fn setup_actions(
+    app: &adw::Application,
+    pool_cell: Rc<OnceCell<SqlitePool>>,
+    prefs_cache: Rc<OnceCell<adw::PreferencesDialog>>,
+) {
     // app.scan
     let scan_action = gio::SimpleAction::new("scan", None);
     scan_action.connect_activate(|_, _| {
@@ -142,8 +153,12 @@ fn setup_actions(app: &adw::Application, pool_cell: Rc<OnceCell<SqlitePool>>, pr
     {
         let pool_cell = pool_cell.clone();
         prefs_action.connect_activate(move |_, _| {
-            let Some(app) = gtk4::gio::Application::default() else { return };
-            let Some(app) = app.downcast_ref::<adw::Application>() else { return };
+            let Some(app) = gtk4::gio::Application::default() else {
+                return;
+            };
+            let Some(app) = app.downcast_ref::<adw::Application>() else {
+                return;
+            };
             let win = app.active_window();
             let pool = pool_cell.get().unwrap().clone();
             let dialog = prefs_cache.get_or_init(|| build_preferences_dialog(pool));
@@ -165,7 +180,8 @@ fn setup_actions(app: &adw::Application, pool_cell: Rc<OnceCell<SqlitePool>>, pr
             .build();
 
         if let Some(app) = gtk4::gio::Application::default() {
-            if let Some(win) = app.downcast_ref::<adw::Application>()
+            if let Some(win) = app
+                .downcast_ref::<adw::Application>()
                 .and_then(|a| a.active_window())
             {
                 dialog.present(Some(&win));
@@ -174,9 +190,9 @@ fn setup_actions(app: &adw::Application, pool_cell: Rc<OnceCell<SqlitePool>>, pr
     });
     app.add_action(&about_action);
 
-    app.set_accels_for_action("app.scan",        &["<Control>r"]);
+    app.set_accels_for_action("app.scan", &["<Control>r"]);
     app.set_accels_for_action("app.preferences", &["<Control>comma"]);
-    app.set_accels_for_action("app.about",       &[]);
+    app.set_accels_for_action("app.about", &[]);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,14 +214,10 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         .title("ComicVine API")
         .build();
 
-    let row_api_url = adw::EntryRow::builder()
-        .title("API URL")
-        .build();
+    let row_api_url = adw::EntryRow::builder().title("API URL").build();
     group_api.add(&row_api_url);
 
-    let row_api_key = adw::PasswordEntryRow::builder()
-        .title("API Key")
-        .build();
+    let row_api_key = adw::PasswordEntryRow::builder().title("API Key").build();
     group_api.add(&row_api_key);
 
     let row_validar = adw::ActionRow::builder()
@@ -231,7 +243,7 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         btn_validar.connect_clicked(move |_| {
             let api_key = row_key.text().to_string();
             let api_url = row_url.text().to_string();
-            
+
             if api_key.is_empty() {
                 row_v.set_subtitle("❌ Introduce una API Key");
                 return;
@@ -246,7 +258,11 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    let url_opt = if api_url.is_empty() { None } else { Some(api_url) };
+                    let url_opt = if api_url.is_empty() {
+                        None
+                    } else {
+                        Some(api_url)
+                    };
                     let client = ComicVineClient::new(api_key, url_opt)?;
                     client.validate().await
                 },
@@ -276,11 +292,14 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         let row_url = row_api_url.clone();
         let row_key = row_api_key.clone();
         let row_r = row_rate.clone();
-        
+
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                SetupRepository::new(&pool_api).get().await.unwrap_or_default()
+                SetupRepository::new(&pool_api)
+                    .get()
+                    .await
+                    .unwrap_or_default()
             },
             move |setup| {
                 if let Some(url) = setup.api_url {
@@ -411,37 +430,33 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                 .and_then(|d| d.root())
                 .and_then(|r| r.downcast::<gtk::Window>().ok());
 
-            file_dialog.select_folder(
-                parent.as_ref(),
-                gio::Cancellable::NONE,
-                move |result| {
-                    let Ok(file) = result else { return };
-                    let Some(path) = file.path() else { return };
-                    let path_str = path.to_string_lossy().to_string();
+            file_dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else { return };
+                let Some(path) = file.path() else { return };
+                let path_str = path.to_string_lossy().to_string();
 
-                    let pool_task = pool_cb.clone();
-                    let pool_ui = pool_cb.clone();
-                    let dir_rows_ui = dir_rows_cb.clone();
-                    let group_ui = group_cb.clone();
+                let pool_task = pool_cb.clone();
+                let pool_ui = pool_cb.clone();
+                let dir_rows_ui = dir_rows_cb.clone();
+                let group_ui = group_cb.clone();
 
-                    run_in_background(
-                        tokio::runtime::Handle::current(),
-                        async move {
-                            let repo = SetupRepository::new(&pool_task);
-                            match repo.add_directorio(&path_str).await {
-                                Ok(_) => repo.get_directorios().await.unwrap_or_default(),
-                                Err(e) => {
-                                    tracing::error!("Error añadiendo directorio: {e}");
-                                    repo.get_directorios().await.unwrap_or_default()
-                                }
+                run_in_background(
+                    tokio::runtime::Handle::current(),
+                    async move {
+                        let repo = SetupRepository::new(&pool_task);
+                        match repo.add_directorio(&path_str).await {
+                            Ok(_) => repo.get_directorios().await.unwrap_or_default(),
+                            Err(e) => {
+                                tracing::error!("Error añadiendo directorio: {e}");
+                                repo.get_directorios().await.unwrap_or_default()
                             }
-                        },
-                        move |dirs| {
-                            populate_dir_list(&group_ui, &dir_rows_ui, dirs, &pool_ui);
-                        },
-                    );
-                },
-            );
+                        }
+                    },
+                    move |dirs| {
+                        populate_dir_list(&group_ui, &dir_rows_ui, dirs, &pool_ui);
+                    },
+                );
+            });
         });
     }
 
@@ -463,8 +478,7 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                 async move {
                     let repo = SetupRepository::new(&pool_task);
                     let dirs = repo.get_directorios().await.unwrap_or_default();
-                    let dir_paths: Vec<String> =
-                        dirs.into_iter().map(|d| d.path).collect();
+                    let dir_paths: Vec<String> = dirs.into_iter().map(|d| d.path).collect();
 
                     if dir_paths.is_empty() {
                         return Err("Sin directorios configurados".to_string());
@@ -472,7 +486,8 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
 
                     let card_size = CardSize::from_db(
                         SetupRepository::new(&pool_task)
-                            .get().await
+                            .get()
+                            .await
                             .map(|s| s.thumbnail_size)
                             .unwrap_or(1),
                     );
@@ -499,13 +514,9 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
     }
 
     // Grupo: Interfaz
-    let group_interfaz = adw::PreferencesGroup::builder()
-        .title("Interfaz")
-        .build();
+    let group_interfaz = adw::PreferencesGroup::builder().title("Interfaz").build();
 
-    let row_tema = adw::ComboRow::builder()
-        .title("Tema")
-        .build();
+    let row_tema = adw::ComboRow::builder().title("Tema").build();
     let temas = gtk::StringList::new(&["Seguir sistema", "Claro", "Oscuro"]);
     row_tema.set_model(Some(&temas));
     group_interfaz.add(&row_tema);
@@ -545,9 +556,7 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
             let pool_task = pool_cs.clone();
             run_in_background(
                 tokio::runtime::Handle::current(),
-                async move {
-                    SetupRepository::new(&pool_task).set_card_size(size).await
-                },
+                async move { SetupRepository::new(&pool_task).set_card_size(size).await },
                 |result| {
                     if let Err(e) = result {
                         tracing::error!("Error guardando tamaño de miniatura: {e}");
@@ -557,10 +566,10 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         });
     }
 
-    let row_items = adw::SpinRow::builder()
-        .title("Ítems por lote")
-        .build();
-    row_items.set_adjustment(Some(&gtk::Adjustment::new(20.0, 10.0, 100.0, 5.0, 20.0, 0.0)));
+    let row_items = adw::SpinRow::builder().title("Ítems por lote").build();
+    row_items.set_adjustment(Some(&gtk::Adjustment::new(
+        20.0, 10.0, 100.0, 5.0, 20.0, 0.0,
+    )));
     group_interfaz.add(&row_items);
 
     let row_scroll_sens = adw::SpinRow::builder()
@@ -574,7 +583,9 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         .title("Cooldown de scroll")
         .subtitle("Milisegundos")
         .build();
-    row_scroll_cd.set_adjustment(Some(&gtk::Adjustment::new(100.0, 50.0, 1000.0, 50.0, 100.0, 0.0)));
+    row_scroll_cd.set_adjustment(Some(&gtk::Adjustment::new(
+        100.0, 50.0, 1000.0, 50.0, 100.0, 0.0,
+    )));
     group_interfaz.add(&row_scroll_cd);
 
     page_general.add(&group_api);
@@ -657,9 +668,7 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
     group_perf.add(&row_cleanup);
 
     // Grupo: Miniaturas
-    let group_thumbs_adv = adw::PreferencesGroup::builder()
-        .title("Miniaturas")
-        .build();
+    let group_thumbs_adv = adw::PreferencesGroup::builder().title("Miniaturas").build();
 
     // Carpeta de thumbnails
     let row_thumb_dir = adw::ActionRow::builder()
@@ -717,10 +726,10 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                 dialog.add_response("cancel", "Cancelar");
                 dialog.add_response("solo_cambiar", "Solo cambiar ruta");
                 dialog.add_response("migrar", "Migrar archivos");
-                
+
                 dialog.set_response_appearance("solo_cambiar", adw::ResponseAppearance::Destructive);
                 dialog.set_response_appearance("migrar", adw::ResponseAppearance::Suggested);
-                
+
                 dialog.set_default_response(Some("migrar"));
                 dialog.set_close_response("cancel");
 
@@ -877,19 +886,22 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                     // Obtener todos los comics catalogados con su path
                     let rows = sqlx::query(
                         "SELECT id_comicbook, path FROM comicbooks \
-                         WHERE id_comicbook_info IS NOT NULL AND en_papelera = 0"
+                         WHERE id_comicbook_info IS NOT NULL AND en_papelera = 0",
                     )
                     .fetch_all(&pool_task)
                     .await
                     .unwrap_or_default();
 
-                    let entries: Vec<(i64, String)> = rows.iter()
-                        .map(|r| (r.get(0), r.get(1)))
-                        .collect();
+                    let entries: Vec<(i64, String)> =
+                        rows.iter().map(|r| (r.get(0), r.get(1))).collect();
 
                     // Calcular hashes a partir del thumbnail existente (o extraer si no existe)
                     let card_size = crate::helpers::thumbnail::CardSize::from_db(
-                        SetupRepository::new(&pool_task).get().await.unwrap_or_default().thumbnail_size
+                        SetupRepository::new(&pool_task)
+                            .get()
+                            .await
+                            .unwrap_or_default()
+                            .thumbnail_size,
                     );
 
                     // Procesamiento secuencial: un archivo a la vez para no saturar la RAM.
@@ -914,12 +926,14 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                             }
                         }
                         out
-                    }).await.unwrap_or_default();
+                    })
+                    .await
+                    .unwrap_or_default();
 
                     let total = computed.len();
                     for (id, hash) in computed {
                         let _ = sqlx::query(
-                            "UPDATE comicbooks SET embedding = ? WHERE id_comicbook = ?"
+                            "UPDATE comicbooks SET embedding = ? WHERE id_comicbook = ?",
                         )
                         .bind(&hash)
                         .bind(id)
@@ -953,11 +967,15 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                SetupRepository::new(&pool_ui).get().await.map(|s| s.clip_al_arranque).unwrap_or(true)
+                SetupRepository::new(&pool_ui)
+                    .get()
+                    .await
+                    .map(|s| s.clip_al_arranque)
+                    .unwrap_or(true)
             },
             move |val| {
                 row.set_active(val);
-            }
+            },
         );
     }
 
@@ -976,7 +994,7 @@ fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                         let _ = repo.save(&setup).await;
                     }
                 },
-                |_| {}
+                |_| {},
             );
         });
     }

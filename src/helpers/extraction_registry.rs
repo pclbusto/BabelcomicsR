@@ -5,7 +5,6 @@
 ///
 /// Este registro persiste en disco para que, si la app se cierra de forma
 /// inesperada (crash, apagón), el próximo arranque pueda limpiar los restos.
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -20,13 +19,14 @@ struct RegistryEntry {
 
 fn registry_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".local/share/babelcomics/extraction_registry.json")
+    PathBuf::from(home).join(".local/share/babelcomics/extraction_registry.json")
 }
 
 fn read_registry() -> Vec<RegistryEntry> {
     let path = registry_path();
-    let Ok(data) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
     serde_json::from_str(&data).unwrap_or_default()
 }
 

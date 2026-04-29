@@ -1,6 +1,6 @@
 pub mod pages;
-pub mod window;
 pub mod reader;
+pub mod window;
 
 use std::cell::RefCell;
 use std::future::Future;

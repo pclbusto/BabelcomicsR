@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::scanner::ComicFormat;
 
@@ -30,7 +30,11 @@ pub fn list_pages(path: &str) -> Result<Vec<String>> {
 /// Si el archivo ya existe en `target_dir` lo devuelve directamente.
 /// Para CB7 la primera llamada extrae todo el archivo (limitación del formato);
 /// las siguientes llamadas son instantáneas gracias al caché en disco.
-pub fn extract_single_page(comic_path: &str, page_name: &str, target_dir: &Path) -> Result<PathBuf> {
+pub fn extract_single_page(
+    comic_path: &str,
+    page_name: &str,
+    target_dir: &Path,
+) -> Result<PathBuf> {
     if !target_dir.exists() {
         std::fs::create_dir_all(target_dir)?;
     }
@@ -72,13 +76,25 @@ fn list_pages_zip(path: &Path) -> Result<Vec<String>> {
         .filter_map(|i| {
             archive.by_index(i).ok().and_then(|f| {
                 let name = f.name().to_string();
-                if is_image_name(&name.to_lowercase()) { Some(name) } else { None }
+                if is_image_name(&name.to_lowercase()) {
+                    Some(name)
+                } else {
+                    None
+                }
             })
         })
         .collect();
     names.sort_by(|a, b| {
-        let a_base = Path::new(a).file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let b_base = Path::new(b).file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let a_base = Path::new(a)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let b_base = Path::new(b)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         natural_sort_compare(&a_base, &b_base)
     });
     Ok(names)
@@ -96,8 +112,16 @@ fn list_pages_rar(path: &Path) -> Result<Vec<String>> {
         .map(|l| l.to_string())
         .collect();
     names.sort_by(|a, b| {
-        let a_base = Path::new(a).file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let b_base = Path::new(b).file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let a_base = Path::new(a)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let b_base = Path::new(b)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         natural_sort_compare(&a_base, &b_base)
     });
     Ok(names)
@@ -120,8 +144,16 @@ fn list_pages_7z(path: &Path) -> Result<Vec<String>> {
         .collect();
 
     names.sort_by(|a, b| {
-        let a_base = Path::new(a).file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let b_base = Path::new(b).file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let a_base = Path::new(a)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let b_base = Path::new(b)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         natural_sort_compare(&a_base, &b_base)
     });
     Ok(names)
@@ -143,7 +175,10 @@ fn list_pages_pdf(path: &Path) -> Result<Vec<String>> {
         .unwrap_or(0);
 
     if count == 0 {
-        bail!("No se pudo determinar el número de páginas del PDF: {}", path.display());
+        bail!(
+            "No se pudo determinar el número de páginas del PDF: {}",
+            path.display()
+        );
     }
 
     Ok((1..=count).map(|i| format!("{:04}", i)).collect())
@@ -186,15 +221,17 @@ fn extract_page_to_memory_pdf(path: &Path, page_name: &str) -> Result<Vec<u8>> {
     let page_num: u32 = page_name.parse().context("Número de página PDF inválido")?;
     let output = Command::new("pdftoppm")
         .args([
-            "-f", &page_num.to_string(),
-            "-l", &page_num.to_string(),
+            "-f",
+            &page_num.to_string(),
+            "-l",
+            &page_num.to_string(),
             "-jpeg",
             "-singlefile",
             path.to_str().unwrap_or(""),
         ])
         .output()
         .context("No se pudo ejecutar 'pdftoppm'")?;
-    
+
     if !output.status.success() {
         bail!("pdftoppm falló para página {}", page_num);
     }
@@ -219,7 +256,9 @@ fn extract_page_zip(comic_path: &Path, page_name: &str, target_dir: &Path) -> Re
 fn extract_page_rar(comic_path: &Path, page_name: &str, target_dir: &Path) -> Result<PathBuf> {
     let status = Command::new("unrar")
         .args([
-            "e", "-y", "-o+",
+            "e",
+            "-y",
+            "-o+",
             comic_path.to_str().unwrap_or(""),
             page_name,
             target_dir.to_str().unwrap_or(""),
@@ -245,7 +284,10 @@ fn extract_page_7z(comic_path: &Path, _page_name: &str, target_dir: &Path) -> Re
         return Ok(dest);
     }
     // El archivo puede estar en un subdirectorio dentro del 7Z
-    find_file_in_dir(target_dir.to_str().unwrap_or(""), &file_name.to_string_lossy())
+    find_file_in_dir(
+        target_dir.to_str().unwrap_or(""),
+        &file_name.to_string_lossy(),
+    )
 }
 
 fn extract_page_pdf(comic_path: &Path, page_name: &str, target_dir: &Path) -> Result<PathBuf> {
@@ -254,8 +296,10 @@ fn extract_page_pdf(comic_path: &Path, page_name: &str, target_dir: &Path) -> Re
     let output_prefix = target_dir.join(format!("page-{:04}", page_num));
     let status = Command::new("pdftoppm")
         .args([
-            "-f", &page_num.to_string(),
-            "-l", &page_num.to_string(),
+            "-f",
+            &page_num.to_string(),
+            "-l",
+            &page_num.to_string(),
             "-jpeg",
             "-singlefile",
             comic_path.to_str().unwrap_or(""),
@@ -264,7 +308,11 @@ fn extract_page_pdf(comic_path: &Path, page_name: &str, target_dir: &Path) -> Re
         .status()
         .context("No se pudo ejecutar 'pdftoppm'")?;
     if !status.success() {
-        bail!("pdftoppm falló extrayendo página {} de {}", page_num, comic_path.display());
+        bail!(
+            "pdftoppm falló extrayendo página {} de {}",
+            page_num,
+            comic_path.display()
+        );
     }
     let dest = target_dir.join(format!("page-{:04}.jpg", page_num));
     Ok(dest)
@@ -301,7 +349,9 @@ fn extract_all_zip(path: &Path, target_dir: &Path) -> Result<Vec<PathBuf>> {
         if is_image_name(&name) {
             let outpath = target_dir.join(file.mangled_name());
             if let Some(p) = outpath.parent() {
-                if !p.exists() { std::fs::create_dir_all(p)?; }
+                if !p.exists() {
+                    std::fs::create_dir_all(p)?;
+                }
             }
             let mut outfile = std::fs::File::create(&outpath)?;
             std::io::copy(&mut file, &mut outfile)?;
@@ -313,7 +363,13 @@ fn extract_all_zip(path: &Path, target_dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn extract_all_rar(path: &Path, target_dir: &Path) -> Result<Vec<PathBuf>> {
     let status = Command::new("unrar")
-        .args(["e", "-y", "-o+", path.to_str().unwrap_or(""), target_dir.to_str().unwrap_or("")])
+        .args([
+            "e",
+            "-y",
+            "-o+",
+            path.to_str().unwrap_or(""),
+            target_dir.to_str().unwrap_or(""),
+        ])
         .status()?;
 
     if !status.success() {
@@ -333,7 +389,11 @@ fn extract_all_7z(path: &Path, target_dir: &Path) -> Result<Vec<PathBuf>> {
 fn extract_all_pdf(path: &Path, target_dir: &Path) -> Result<Vec<PathBuf>> {
     let output_prefix = target_dir.join("page");
     let status = Command::new("pdftoppm")
-        .args(["-jpeg", path.to_str().unwrap_or(""), output_prefix.to_str().unwrap_or("")])
+        .args([
+            "-jpeg",
+            path.to_str().unwrap_or(""),
+            output_prefix.to_str().unwrap_or(""),
+        ])
         .status()?;
 
     if !status.success() {
@@ -362,14 +422,18 @@ fn extract_cover_zip(path: &Path) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("No se pudo abrir: {}", path.display()))?;
 
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("ZIP inválido: {}", path.display()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).with_context(|| format!("ZIP inválido: {}", path.display()))?;
 
     let mut image_names: Vec<String> = (0..archive.len())
         .filter_map(|i| {
             archive.by_index(i).ok().and_then(|f| {
                 let name = f.name().to_lowercase();
-                if is_image_name(&name) { Some(f.name().to_string()) } else { None }
+                if is_image_name(&name) {
+                    Some(f.name().to_string())
+                } else {
+                    None
+                }
             })
         })
         .collect();
@@ -411,7 +475,14 @@ fn extract_cover_rar(path: &Path) -> Result<Vec<u8>> {
 
     let tmp_dir = tempfile_dir()?;
     let status = Command::new("unrar")
-        .args(["e", "-y", "-o+", path.to_str().unwrap_or(""), first, &tmp_dir])
+        .args([
+            "e",
+            "-y",
+            "-o+",
+            path.to_str().unwrap_or(""),
+            first,
+            &tmp_dir,
+        ])
         .status()
         .context("Error ejecutando unrar")?;
 
@@ -419,7 +490,11 @@ fn extract_cover_rar(path: &Path) -> Result<Vec<u8>> {
         bail!("unrar falló extrayendo '{}' de {}", first, path.display());
     }
 
-    let file_name = Path::new(first).file_name().unwrap_or_default().to_str().unwrap_or("");
+    let file_name = Path::new(first)
+        .file_name()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or("");
     let extracted = Path::new(&tmp_dir).join(file_name);
 
     let bytes = std::fs::read(&extracted)
@@ -479,8 +554,10 @@ fn extract_cover_pdf(path: &Path) -> Result<Vec<u8>> {
 
     let status = Command::new("pdftoppm")
         .args([
-            "-f", "1",
-            "-l", "1",
+            "-f",
+            "1",
+            "-l",
+            "1",
             "-jpeg",
             "-singlefile",
             path.to_str().unwrap_or(""),
@@ -494,8 +571,12 @@ fn extract_cover_pdf(path: &Path) -> Result<Vec<u8>> {
     }
 
     let extracted = Path::new(&tmp_dir).join("pdf_cover.jpg");
-    let bytes = std::fs::read(&extracted)
-        .with_context(|| format!("No se pudo leer la portada PDF extraída: {}", extracted.display()))?;
+    let bytes = std::fs::read(&extracted).with_context(|| {
+        format!(
+            "No se pudo leer la portada PDF extraída: {}",
+            extracted.display()
+        )
+    })?;
 
     let _ = std::fs::remove_file(&extracted);
     Ok(bytes)
@@ -507,7 +588,10 @@ fn extract_cover_pdf(path: &Path) -> Result<Vec<u8>> {
 
 fn collect_and_sort_images(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut images = Vec::new();
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
             if is_image_name(&name) {
@@ -532,11 +616,15 @@ fn natural_sort_compare(a: &str, b: &str) -> std::cmp::Ordering {
     for (a_p, b_p) in a_parts.iter().zip(b_parts.iter()) {
         match (a_p.parse::<u64>(), b_p.parse::<u64>()) {
             (Ok(a_n), Ok(b_n)) => {
-                if a_n != b_n { return a_n.cmp(&b_n); }
+                if a_n != b_n {
+                    return a_n.cmp(&b_n);
+                }
             }
             _ => {
                 let cmp = a_p.to_lowercase().cmp(&b_p.to_lowercase());
-                if cmp != std::cmp::Ordering::Equal { return cmp; }
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
             }
         }
     }
@@ -558,7 +646,9 @@ fn split_natural(s: &str) -> Vec<String> {
         }
         current.push(c);
     }
-    if !current.is_empty() { parts.push(current); }
+    if !current.is_empty() {
+        parts.push(current);
+    }
     parts
 }
 
@@ -580,7 +670,10 @@ fn tempfile_dir() -> Result<String> {
 }
 
 fn find_file_in_dir(dir: &str, filename: &str) -> Result<PathBuf> {
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             if let Some(name) = entry.file_name().to_str() {
                 if name == filename {

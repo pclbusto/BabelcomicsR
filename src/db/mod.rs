@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use std::path::Path;
 
 pub async fn create_pool(db_path: &str) -> Result<SqlitePool> {

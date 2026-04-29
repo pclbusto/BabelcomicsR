@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use sqlx::{Row, SqlitePool};
 
 use crate::helpers::comicvine_client::ComicVineClient;
@@ -52,19 +52,24 @@ pub async fn import_publisher_from_cv(
         .map(|s| s.to_string());
 
     if name.is_empty() {
-        bail!("La API devolvió un nombre de editorial vacío para id {}", cv_publisher_id);
+        bail!(
+            "La API devolvió un nombre de editorial vacío para id {}",
+            cv_publisher_id
+        );
     }
 
     // ── 2. Upsert del publisher ───────────────────────────────────────────────
-    let publisher_local_id =
-        upsert_publisher(pool, cv_publisher_id, &name, description.as_deref(), image_url.as_deref())
-            .await?;
+    let publisher_local_id = upsert_publisher(
+        pool,
+        cv_publisher_id,
+        &name,
+        description.as_deref(),
+        image_url.as_deref(),
+    )
+    .await?;
 
     // ── 3. Importar volúmenes asociados ───────────────────────────────────────
-    let volumes_arr = details["volumes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let volumes_arr = details["volumes"].as_array().cloned().unwrap_or_default();
 
     let total = volumes_arr.len();
     let mut inserted = 0usize;
@@ -136,11 +141,10 @@ async fn upsert_publisher(
     .await?;
 
     // Obtener el id_publisher (ya sea recién insertado o preexistente)
-    let row =
-        sqlx::query("SELECT id_publisher FROM publishers WHERE id_comicvine = ?")
-            .bind(cv_id)
-            .fetch_one(pool)
-            .await?;
+    let row = sqlx::query("SELECT id_publisher FROM publishers WHERE id_comicvine = ?")
+        .bind(cv_id)
+        .fetch_one(pool)
+        .await?;
 
     Ok(row.get::<i64, _>(0))
 }

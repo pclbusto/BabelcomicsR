@@ -1,5 +1,5 @@
 use anyhow::Result;
-use babelcomics::{db, helpers, repositories, app};
+use babelcomics::{app, db, helpers, repositories};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,8 +20,11 @@ async fn main() -> Result<()> {
         .map(|n| n.get())
         .unwrap_or(4);
     let rayon_threads = (cores as i32 - 2).max(1) as usize;
-    tracing::info!("Configurando Rayon con {} hilos (reservando 2 para UI)", rayon_threads);
-    
+    tracing::info!(
+        "Configurando Rayon con {} hilos (reservando 2 para UI)",
+        rayon_threads
+    );
+
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(rayon_threads)
         .build_global();

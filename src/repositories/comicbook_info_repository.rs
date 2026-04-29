@@ -12,8 +12,12 @@ impl<'a> ComicbookInfoRepository<'a> {
         Self { pool }
     }
 
-    pub async fn get_view_by_volume(&self, volume_id: i64) -> Result<Vec<crate::models::ComicbookInfoView>> {
-        self.get_view_by_volume_page(volume_id, i64::MAX, 0, None, false).await
+    pub async fn get_view_by_volume(
+        &self,
+        volume_id: i64,
+    ) -> Result<Vec<crate::models::ComicbookInfoView>> {
+        self.get_view_by_volume_page(volume_id, i64::MAX, 0, None, false)
+            .await
     }
 
     pub async fn get_view_by_volume_page(
@@ -39,8 +43,16 @@ impl<'a> ComicbookInfoRepository<'a> {
                {}
                ORDER BY CAST(ci.numero AS REAL), ci.numero
                LIMIT ? OFFSET ?"#,
-            if pattern.is_some() { "AND (ci.titulo LIKE ? OR ci.numero LIKE ?)" } else { "" },
-            if solo_poseidos { "AND (SELECT COUNT(*) FROM comicbooks cb WHERE cb.id_comicbook_info = ci.id_comicbook_info) > 0" } else { "" },
+            if pattern.is_some() {
+                "AND (ci.titulo LIKE ? OR ci.numero LIKE ?)"
+            } else {
+                ""
+            },
+            if solo_poseidos {
+                "AND (SELECT COUNT(*) FROM comicbooks cb WHERE cb.id_comicbook_info = ci.id_comicbook_info) > 0"
+            } else {
+                ""
+            },
         );
 
         let mut q = sqlx::query(&sql).bind(volume_id);
@@ -49,29 +61,32 @@ impl<'a> ComicbookInfoRepository<'a> {
         }
         let rows = q.bind(limit).bind(offset).fetch_all(self.pool).await?;
 
-        use sqlx::Row;
         use crate::models::{ComicbookInfo, ComicbookInfoView};
+        use sqlx::Row;
 
-        let views = rows.into_iter().map(|r| {
-            let info = ComicbookInfo {
-                id_comicbook_info: r.get(0),
-                titulo:            r.get(1),
-                id_volume:         r.get(2),
-                numero:            r.get(3),
-                resumen:           r.get(4),
-                calificacion:      r.get(5),
-                id_comicvine:      r.get(6),
-                url_api_detalle:   r.get(7),
-                fue_actualizado_api: r.get(8),
-            };
-            ComicbookInfoView {
-                info,
-                physical_count: r.get(9),
-                ruta_cover:     r.get(10),
-                id_comicbook:   r.get(11),
-                url_original:   r.get(12),
-            }
-        }).collect();
+        let views = rows
+            .into_iter()
+            .map(|r| {
+                let info = ComicbookInfo {
+                    id_comicbook_info: r.get(0),
+                    titulo: r.get(1),
+                    id_volume: r.get(2),
+                    numero: r.get(3),
+                    resumen: r.get(4),
+                    calificacion: r.get(5),
+                    id_comicvine: r.get(6),
+                    url_api_detalle: r.get(7),
+                    fue_actualizado_api: r.get(8),
+                };
+                ComicbookInfoView {
+                    info,
+                    physical_count: r.get(9),
+                    ruta_cover: r.get(10),
+                    id_comicbook: r.get(11),
+                    url_original: r.get(12),
+                }
+            })
+            .collect();
 
         Ok(views)
     }
@@ -204,9 +219,12 @@ impl<'a> ComicbookInfoRepository<'a> {
     }
 
     pub async fn delete(&self, id: i64) -> Result<()> {
-        sqlx::query!("DELETE FROM comicbooks_info WHERE id_comicbook_info = ?", id)
-            .execute(self.pool)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM comicbooks_info WHERE id_comicbook_info = ?",
+            id
+        )
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
@@ -283,7 +301,9 @@ impl<'a> ComicbookInfoRepository<'a> {
 
     /// (cover_id, ruta_local_or_empty, url_original, vol_nombre, id_volume) para todas las portadas sin embedding CLIP.
     /// Si ruta_local está seteada se usa directamente; si no, se reconstruye el path desde url+vol.
-    pub async fn get_covers_without_clip_embedding(&self) -> Result<Vec<(i64, String, String, String, i64)>> {
+    pub async fn get_covers_without_clip_embedding(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, i64)>> {
         self.get_covers_for_clip(None, true).await
     }
 
@@ -309,8 +329,16 @@ impl<'a> ComicbookInfoRepository<'a> {
                LEFT JOIN volumens v ON v.id_volume = ci.id_volume
                WHERE {}{}
                ORDER BY cic.id"#,
-            if solo_faltantes { "cic.clip_embedding IS NULL" } else { "1=1" },
-            if volume_id.is_some() { " AND ci.id_volume = ?" } else { "" },
+            if solo_faltantes {
+                "cic.clip_embedding IS NULL"
+            } else {
+                "1=1"
+            },
+            if volume_id.is_some() {
+                " AND ci.id_volume = ?"
+            } else {
+                ""
+            },
         );
 
         let mut q = sqlx::query(&sql);
@@ -319,7 +347,10 @@ impl<'a> ComicbookInfoRepository<'a> {
         }
 
         let rows = q.fetch_all(self.pool).await?;
-        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4))).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)))
+            .collect())
     }
 
     /// (id_comicbook_info, clip_embedding) de todas las portadas indexadas.
@@ -333,25 +364,43 @@ impl<'a> ComicbookInfoRepository<'a> {
         )
         .fetch_all(self.pool)
         .await?;
-        Ok(rows.into_iter().filter_map(|r| {
-            let blob: Option<Vec<u8>> = r.get(1);
-            blob.map(|b| (r.get(0), b))
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let blob: Option<Vec<u8>> = r.get(1);
+                blob.map(|b| (r.get(0), b))
+            })
+            .collect())
     }
 
     /// (total, con_archivo_local, ya_indexadas, pendientes)
-    pub async fn count_clip_index_stats(&self) -> Result<(i64, i64, i64, i64)> {
+    pub async fn count_clip_index_stats(
+        &self,
+        volume_id: Option<i64>,
+    ) -> Result<(i64, i64, i64, i64)> {
         use sqlx::Row;
-        let row = sqlx::query(
+        let sql = format!(
             r#"SELECT
                 COUNT(*),
                 COUNT(CASE WHEN ruta_local IS NOT NULL THEN 1 END),
                 COUNT(CASE WHEN clip_embedding IS NOT NULL THEN 1 END),
                 COUNT(CASE WHEN ruta_local IS NOT NULL AND clip_embedding IS NULL THEN 1 END)
-               FROM comicbooks_info_covers"#,
-        )
-        .fetch_one(self.pool)
-        .await?;
+               FROM comicbooks_info_covers cic
+               LEFT JOIN comicbooks_info ci ON ci.id_comicbook_info = cic.id_comicbook_info
+               {}"#,
+            if volume_id.is_some() {
+                "WHERE ci.id_volume = ?"
+            } else {
+                ""
+            },
+        );
+
+        let mut q = sqlx::query(&sql);
+        if let Some(vid) = volume_id {
+            q = q.bind(vid);
+        }
+
+        let row = q.fetch_one(self.pool).await?;
         Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
     }
 }

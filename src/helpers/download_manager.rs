@@ -1,13 +1,13 @@
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use tokio::sync::{mpsc, broadcast};
-use serde_json::Value;
-use sqlx::SqlitePool;
 use crate::helpers::comicvine_client::ComicVineClient;
 use crate::helpers::paths::comicbook_info_thumbnail_path;
-use crate::models::{NewPublisher, NewVolume, NewComicbookInfo, NewComicbookInfoCover};
-use crate::repositories::{PublisherRepository, VolumeRepository, ComicbookInfoRepository};
+use crate::models::{NewComicbookInfo, NewComicbookInfoCover, NewPublisher, NewVolume};
 use crate::repositories::SetupRepository;
+use crate::repositories::{ComicbookInfoRepository, PublisherRepository, VolumeRepository};
+use serde_json::Value;
+use sqlx::SqlitePool;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DownloadStatus {
@@ -83,14 +83,21 @@ impl DownloadManager {
 
     pub fn add_download(&self, volume_data: Value, download_covers: bool) {
         let cv_id = volume_data["id"].as_u64().unwrap_or(0).to_string();
-        if cv_id == "0" { return; }
+        if cv_id == "0" {
+            return;
+        }
 
         let mut active = self.active_downloads.lock().unwrap();
-        if active.contains_key(&cv_id) { return; }
+        if active.contains_key(&cv_id) {
+            return;
+        }
 
         let info = DownloadInfo {
             volume_cv_id: cv_id.clone(),
-            title: volume_data["name"].as_str().unwrap_or("Desconocido").to_string(),
+            title: volume_data["name"]
+                .as_str()
+                .unwrap_or("Desconocido")
+                .to_string(),
             total_issues: volume_data["count_of_issues"].as_i64().unwrap_or(0),
             progress: 0.0,
             message: "En cola...".to_string(),
@@ -122,8 +129,19 @@ impl DownloadManager {
                         // Solo procesamos este volumen para evitar saturar la CPU con otros pendientes.
                         let pool = self.pool.clone();
                         tokio::spawn(async move {
-                            match crate::helpers::scan_service::generate_clip_embeddings(&pool, Some(volume_id), true).await {
-                                Ok((n, _)) if n > 0 => tracing::info!("CLIP: {} portadas nuevas indexadas tras descarga del volumen {}", n, volume_id),
+                            match crate::helpers::scan_service::generate_clip_embeddings(
+                                &pool,
+                                Some(volume_id),
+                                true,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok((n, _)) if n > 0 => tracing::info!(
+                                    "CLIP: {} portadas nuevas indexadas tras descarga del volumen {}",
+                                    n,
+                                    volume_id
+                                ),
                                 Err(e) => tracing::warn!("CLIP post-descarga: {e}"),
                                 _ => {}
                             }
@@ -131,7 +149,12 @@ impl DownloadManager {
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
-                        self.update_status(&cv_id, DownloadStatus::Error(err_msg.clone()), 0.0, &format!("Error: {}", err_msg));
+                        self.update_status(
+                            &cv_id,
+                            DownloadStatus::Error(err_msg.clone()),
+                            0.0,
+                            &format!("Error: {}", err_msg),
+                        );
                         let _ = self.tx_events.send(DownloadEvent::Error(cv_id, err_msg));
                     }
                 }
@@ -145,14 +168,19 @@ impl DownloadManager {
             info.status = status;
             info.progress = progress;
             info.message = msg.to_string();
-            let _ = self.tx_events.send(DownloadEvent::Progress(cv_id.to_string(), progress, msg.to_string()));
+            let _ = self.tx_events.send(DownloadEvent::Progress(
+                cv_id.to_string(),
+                progress,
+                msg.to_string(),
+            ));
         }
     }
 
     async fn process_download(&self, cv_id: &str) -> anyhow::Result<i64> {
         // 1. Obtener API key y crear cliente
         let setup = SetupRepository::new(&self.pool).get().await?;
-        let api_key = setup.api_key_encrypted
+        let api_key = setup
+            .api_key_encrypted
             .as_deref()
             .filter(|k| !k.is_empty())
             .ok_or_else(|| anyhow::anyhow!("No hay API key configurada"))?
@@ -162,37 +190,71 @@ impl DownloadManager {
         let client = ComicVineClient::new(api_key, base_url)?;
 
         // 2. Obtener detalles del volumen
-        self.update_status(cv_id, DownloadStatus::Downloading, 0.02, "Obteniendo detalles del volumen...");
+        self.update_status(
+            cv_id,
+            DownloadStatus::Downloading,
+            0.02,
+            "Obteniendo detalles del volumen...",
+        );
         let vol_details = client
             .get_volume_details(cv_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("No se pudo obtener el volumen de ComicVine"))?;
 
-        let vol_name = vol_details["name"].as_str().unwrap_or("Desconocido").to_string();
+        let vol_name = vol_details["name"]
+            .as_str()
+            .unwrap_or("Desconocido")
+            .to_string();
         let vol_cv_id = vol_details["id"].as_i64().unwrap_or(0);
         let vol_deck = strip_html(vol_details["deck"].as_str().unwrap_or(""));
         let vol_desc = strip_html(vol_details["description"].as_str().unwrap_or(""));
-        let vol_url = vol_details["site_detail_url"].as_str().unwrap_or("").to_string();
-        let vol_year = vol_details["start_year"].as_str()
+        let vol_url = vol_details["site_detail_url"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let vol_year = vol_details["start_year"]
+            .as_str()
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
         let vol_count = vol_details["count_of_issues"].as_i64().unwrap_or(0);
-        let vol_image = vol_details["image"]["medium_url"].as_str().unwrap_or("").to_string();
+        let vol_image = vol_details["image"]["medium_url"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
         let http_client = reqwest::Client::builder()
             .user_agent("BabelcomicsR/1.0 (Rust)")
             .build()?;
 
         // 3. Upsert editorial
-        self.update_status(cv_id, DownloadStatus::Downloading, 0.05, "Guardando editorial...");
+        self.update_status(
+            cv_id,
+            DownloadStatus::Downloading,
+            0.05,
+            "Guardando editorial...",
+        );
         let publisher_id = self.upsert_publisher(&vol_details).await?;
 
         // 4. Upsert volumen
-        self.update_status(cv_id, DownloadStatus::Downloading, 0.08, "Guardando serie...");
-        let volume_id = self.upsert_volume(
-            vol_cv_id, &vol_name, &vol_deck, &vol_desc, &vol_url, &vol_image,
-            publisher_id, vol_year, vol_count,
-        ).await?;
+        self.update_status(
+            cv_id,
+            DownloadStatus::Downloading,
+            0.08,
+            "Guardando serie...",
+        );
+        let volume_id = self
+            .upsert_volume(
+                vol_cv_id,
+                &vol_name,
+                &vol_deck,
+                &vol_desc,
+                &vol_url,
+                &vol_image,
+                publisher_id,
+                vol_year,
+                vol_count,
+            )
+            .await?;
 
         // Descargar la portada del volumen si no tenemos una ya (como fallback)
         if !vol_image.is_empty() {
@@ -210,7 +272,12 @@ impl DownloadManager {
         }
 
         // 5. Obtener todos los issues
-        self.update_status(cv_id, DownloadStatus::Downloading, 0.10, "Obteniendo lista de números...");
+        self.update_status(
+            cv_id,
+            DownloadStatus::Downloading,
+            0.10,
+            "Obteniendo lista de números...",
+        );
         let issues = client.get_volume_issues(cv_id).await;
         let total = issues.len().max(1);
 
@@ -226,7 +293,10 @@ impl DownloadManager {
         // 6. Procesar cada issue
         let download_covers = {
             let active = self.active_downloads.lock().unwrap();
-            active.get(cv_id).map(|i| i.download_covers).unwrap_or(false)
+            active
+                .get(cv_id)
+                .map(|i| i.download_covers)
+                .unwrap_or(false)
         };
 
         for (i, issue) in issues.iter().enumerate() {
@@ -263,7 +333,8 @@ impl DownloadManager {
                     calificacion: None,
                     id_comicvine: Some(issue_cv_id),
                     url_api_detalle: url_api,
-                }).await?
+                })
+                .await?
             };
 
             // Gestionar portadas
@@ -275,27 +346,39 @@ impl DownloadManager {
 
                 if !already_has_this_url {
                     if download_covers {
-                        let local_path = self.download_cover(
-                            &http_client, &url, &vol_name, vol_cv_id, issue_cv_id,
-                        ).await.ok();
+                        let local_path = self
+                            .download_cover(&http_client, &url, &vol_name, vol_cv_id, issue_cv_id)
+                            .await
+                            .ok();
                         repo.insert_cover(&NewComicbookInfoCover {
                             id_comicbook_info: info_id,
                             url_original: url,
                             ruta_local: local_path,
-                        }).await?;
+                        })
+                        .await?;
                     } else {
                         repo.insert_cover(&NewComicbookInfoCover {
                             id_comicbook_info: info_id,
                             url_original: url,
                             ruta_local: None,
-                        }).await?;
+                        })
+                        .await?;
                     }
                 } else if download_covers {
                     // Si ya existe la entrada en la BD pero no tiene ruta_local (fue una descarga sin portadas previa)
                     // intentamos descargarla ahora.
                     for cover in existing_covers {
                         if cover.url_original == url && cover.ruta_local.is_none() {
-                            if let Ok(local_path) = self.download_cover(&http_client, &url, &vol_name, vol_cv_id, issue_cv_id).await {
+                            if let Ok(local_path) = self
+                                .download_cover(
+                                    &http_client,
+                                    &url,
+                                    &vol_name,
+                                    vol_cv_id,
+                                    issue_cv_id,
+                                )
+                                .await
+                            {
                                 let _ = repo.set_cover_local_path(cover.id, &local_path).await;
                             }
                         }
@@ -319,13 +402,18 @@ impl DownloadManager {
             }
         }
 
-        let nombre = pub_data["name"].as_str().unwrap_or("Desconocido").to_string();
-        let id = repo.insert(&NewPublisher {
-            nombre,
-            descripcion: None,
-            id_comicvine: if pub_cv_id > 0 { Some(pub_cv_id) } else { None },
-            image_url: None,
-        }).await?;
+        let nombre = pub_data["name"]
+            .as_str()
+            .unwrap_or("Desconocido")
+            .to_string();
+        let id = repo
+            .insert(&NewPublisher {
+                nombre,
+                descripcion: None,
+                id_comicvine: if pub_cv_id > 0 { Some(pub_cv_id) } else { None },
+                image_url: None,
+            })
+            .await?;
 
         Ok(id)
     }
@@ -350,17 +438,19 @@ impl DownloadManager {
             }
         }
 
-        let id = repo.insert(&NewVolume {
-            nombre: nombre.to_string(),
-            deck: deck.to_string(),
-            descripcion: descripcion.to_string(),
-            url: url.to_string(),
-            image_url: image_url.to_string(),
-            id_publisher,
-            anio_inicio,
-            cantidad_numeros,
-            id_comicvine: if cv_id > 0 { Some(cv_id) } else { None },
-        }).await?;
+        let id = repo
+            .insert(&NewVolume {
+                nombre: nombre.to_string(),
+                deck: deck.to_string(),
+                descripcion: descripcion.to_string(),
+                url: url.to_string(),
+                image_url: image_url.to_string(),
+                id_publisher,
+                anio_inicio,
+                cantidad_numeros,
+                id_comicvine: if cv_id > 0 { Some(cv_id) } else { None },
+            })
+            .await?;
 
         Ok(id)
     }

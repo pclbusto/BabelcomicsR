@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
 use libadwaita as adw;
-use adw::prelude::*;
 use sqlx::SqlitePool;
 
 use crate::helpers::download_manager::{DownloadManager, DownloadStatus};
@@ -91,20 +91,25 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
                 list_box.append(&row);
                 stack.set_visible_child_name("list");
 
-                rows_map.insert(cv_id.clone(), DownloadRow {
-                    row,
-                    progress,
-                    status_icon,
-                });
+                rows_map.insert(
+                    cv_id.clone(),
+                    DownloadRow {
+                        row,
+                        progress,
+                        status_icon,
+                    },
+                );
             }
         }
 
         // Actualizar filas existentes
         for (cv_id, dr) in rows_map.iter() {
             if let Some(info) = downloads.get(cv_id) {
-                dr.row.set_subtitle(glib::markup_escape_text(&info.message).as_str());
+                dr.row
+                    .set_subtitle(glib::markup_escape_text(&info.message).as_str());
                 dr.progress.set_fraction(info.progress);
-                dr.status_icon.set_icon_name(Some(status_icon_name(&info.status)));
+                dr.status_icon
+                    .set_icon_name(Some(status_icon_name(&info.status)));
 
                 if matches!(info.status, DownloadStatus::Error(_)) {
                     dr.row.add_css_class("error");

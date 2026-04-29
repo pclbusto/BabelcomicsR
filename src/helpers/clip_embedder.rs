@@ -73,7 +73,11 @@ pub fn is_model_loaded() -> bool {
 /// Rango: [-1.0, 1.0].  Valores cercanos a 1.0 = imágenes muy similares.
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Los embeddings deben tener la misma dimensión");
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "Los embeddings deben tener la misma dimensión"
+    );
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -119,16 +123,12 @@ impl ClipEmbedder {
         // Directorio de caché: ~/.local/share/babelcomics/models/
         let models_dir = {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(home)
-                .join(".local/share/babelcomics/models")
+            std::path::PathBuf::from(home).join(".local/share/babelcomics/models")
         };
         std::fs::create_dir_all(&models_dir)
             .context("No se pudo crear el directorio de modelos")?;
 
-        tracing::info!(
-            "Cargando modelo CLIP (caché: {})…",
-            models_dir.display()
-        );
+        tracing::info!("Cargando modelo CLIP (caché: {})…", models_dir.display());
 
         // Construir la API de HuggingFace Hub con caché local
         let api = hf_hub::api::sync::ApiBuilder::new()
@@ -143,7 +143,9 @@ impl ClipEmbedder {
         let model_path = repo
             .get("model.safetensors")
             .or_else(|_| repo.get("pytorch_model.bin"))
-            .context("Error descargando pesos del modelo CLIP (model.safetensors o pytorch_model.bin)")?;
+            .context(
+                "Error descargando pesos del modelo CLIP (model.safetensors o pytorch_model.bin)",
+            )?;
 
         tracing::info!("Pesos descargados, cargando modelo CLIP en memoria…");
 
@@ -166,8 +168,7 @@ impl ClipEmbedder {
                 .context("Error cargando pytorch_model.bin del modelo CLIP")?
         };
 
-        let model = clip::ClipModel::new(vb, &config)
-            .context("Error inicializando modelo CLIP")?;
+        let model = clip::ClipModel::new(vb, &config).context("Error inicializando modelo CLIP")?;
 
         tracing::info!("Modelo CLIP ViT-B/32 listo");
 
@@ -186,8 +187,8 @@ impl ClipEmbedder {
             .context("Error en inferencia CLIP")?;
 
         // Normalización L2 (candle la implementa directamente)
-        let normalized = clip::div_l2_norm(&features)
-            .context("Error normalizando embedding CLIP")?;
+        let normalized =
+            clip::div_l2_norm(&features).context("Error normalizando embedding CLIP")?;
 
         // Extraer como Vec<f32>: flatten [1, 512] → [512]
         let embedding: Vec<f32> = normalized
@@ -208,8 +209,7 @@ impl ClipEmbedder {
     /// 4. Normalizar con media/std estándar de CLIP.
     /// 5. Construir tensor [1, 3, 224, 224] (batch, canal, alto, ancho).
     fn preprocess(&self, img_bytes: &[u8]) -> Result<Tensor> {
-        let img = image::load_from_memory(img_bytes)
-            .context("No se pudo decodificar la imagen")?;
+        let img = image::load_from_memory(img_bytes).context("No se pudo decodificar la imagen")?;
 
         // Resize a 224×224 con relleno central (preserva aspecto mejor que stretch)
         let img = img.resize_to_fill(
@@ -225,22 +225,18 @@ impl ClipEmbedder {
         let mut data = vec![0f32; 3 * pixels]; // layout planar: [C, H*W]
 
         for i in 0..pixels {
-            let r = raw[3 * i]     as f32 / 255.0;
+            let r = raw[3 * i] as f32 / 255.0;
             let g = raw[3 * i + 1] as f32 / 255.0;
             let b = raw[3 * i + 2] as f32 / 255.0;
 
-            data[i]              = (r - MEAN[0]) / STD[0];
-            data[pixels + i]     = (g - MEAN[1]) / STD[1];
+            data[i] = (r - MEAN[0]) / STD[0];
+            data[pixels + i] = (g - MEAN[1]) / STD[1];
             data[2 * pixels + i] = (b - MEAN[2]) / STD[2];
         }
 
         // Tensor [1, 3, 224, 224]
-        let tensor = Tensor::from_vec(
-            data,
-            (1usize, 3usize, IMAGE_SIZE, IMAGE_SIZE),
-            &self.device,
-        )
-        .context("Error creando tensor de imagen")?;
+        let tensor = Tensor::from_vec(data, (1usize, 3usize, IMAGE_SIZE, IMAGE_SIZE), &self.device)
+            .context("Error creando tensor de imagen")?;
 
         Ok(tensor)
     }

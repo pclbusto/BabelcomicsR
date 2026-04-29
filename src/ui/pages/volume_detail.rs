@@ -1,16 +1,50 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::mpsc;
 
-use gtk4::prelude::*;
-use gtk4::{self as gtk, gio};
-use libadwaita as adw;
 use adw::prelude::*;
+use gtk4::prelude::*;
+use gtk4::{self as gtk, gio, glib};
+use libadwaita as adw;
 use sqlx::SqlitePool;
 
 use crate::helpers::download_manager::DownloadManager;
-use crate::models::{Volume, ComicbookInfoView};
-use crate::repositories::{VolumeRepository, ComicbookInfoRepository, PublisherRepository};
+use crate::models::{ComicbookInfoView, Volume};
+use crate::repositories::{ComicbookInfoRepository, PublisherRepository, VolumeRepository};
 use crate::ui::run_in_background;
+
+#[derive(Clone, Copy)]
+struct ClipDialogStats {
+    total_db: i64,
+    con_archivo: i64,
+    indexadas: i64,
+    total_missing_candidates: i64,
+    total_all_candidates: i64,
+}
+
+fn build_clip_dialog_body(stats: ClipDialogStats) -> String {
+    if stats.total_all_candidates == 0 {
+        return format!(
+            "Este volumen no tiene portadas candidatas para indexar.\nHay {} issues en BD y {} embeddings ya guardados.",
+            stats.total_db, stats.indexadas
+        );
+    }
+
+    if stats.total_missing_candidates == 0 {
+        return format!(
+            "No quedan faltantes en este volumen.\nYa hay {} portadas indexadas.\nPuedes reindexar {} portadas candidatas si quieres regenerarlas.",
+            stats.indexadas, stats.total_all_candidates
+        );
+    }
+
+    format!(
+        "Faltan {} portadas por indexar.\nYa hay {} indexadas de {} con archivo local.\nSi eliges reindexar, se procesarán {} portadas candidatas.",
+        stats.total_missing_candidates,
+        stats.indexadas,
+        stats.con_archivo,
+        stats.total_all_candidates
+    )
+}
 
 /// Construye el widget de detalle de un volumen.
 pub fn build(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
@@ -34,7 +68,11 @@ pub fn build(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            VolumeRepository::new(&pool_v).get_by_id(volume_id).await.ok().flatten()
+            VolumeRepository::new(&pool_v)
+                .get_by_id(volume_id)
+                .await
+                .ok()
+                .flatten()
         },
         move |vol_opt| {
             let name = vol_opt.map(|v| v.nombre).unwrap_or_default();
@@ -43,14 +81,14 @@ pub fn build(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
             let info_content = build_info_tab(volume_id, pool_v2.clone());
             let info_page = tab_view_v.append(&info_content);
             info_page.set_title("Información");
-            info_page.set_icon(Some(&gio::ThemedIcon::new("info-outline-symbolic")));
+            info_page.set_icon(Some(&gio::ThemedIcon::new("dialog-information-symbolic")));
 
             // Pestaña: Issues
             let issues_content = build_issues_tab(volume_id, &name, pool_v2, tab_view_v.clone());
             let issues_page = tab_view_v.append(&issues_content);
             issues_page.set_title("Issues");
             issues_page.set_icon(Some(&gio::ThemedIcon::new("view-list-symbolic")));
-        }
+        },
     );
 
     content_box.upcast()
@@ -85,15 +123,31 @@ fn build_info_tab(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            let vol = VolumeRepository::new(&pool_task).get_by_id(volume_id).await.ok().flatten()?;
-            let publ = PublisherRepository::new(&pool_task).get_by_id(vol.id_publisher).await.ok().flatten();
-            let issues = ComicbookInfoRepository::new(&pool_task).get_view_by_volume(volume_id).await.unwrap_or_default();
-            
+            let vol = VolumeRepository::new(&pool_task)
+                .get_by_id(volume_id)
+                .await
+                .ok()
+                .flatten()?;
+            let publ = PublisherRepository::new(&pool_task)
+                .get_by_id(vol.id_publisher)
+                .await
+                .ok()
+                .flatten();
+            let issues = ComicbookInfoRepository::new(&pool_task)
+                .get_view_by_volume(volume_id)
+                .await
+                .unwrap_or_default();
+
             let owned = issues.iter().filter(|i| i.physical_count > 0).count();
             let total = vol.cantidad_numeros;
-            let percent = if total > 0 { (owned as f64 / total as f64) * 100.0 } else { 0.0 };
-            
-            let first_issue_cover = issues.iter()
+            let percent = if total > 0 {
+                (owned as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let first_issue_cover = issues
+                .iter()
                 .filter_map(|i| i.ruta_cover.as_ref())
                 .next()
                 .cloned();
@@ -102,7 +156,15 @@ fn build_info_tab(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
         },
         move |res| {
             if let Some((vol, publ, owned, total, percent, first_issue_cover)) = res {
-                let content = build_info_content(&vol, publ.as_ref(), owned, total, percent, first_issue_cover, pool.clone());
+                let content = build_info_content(
+                    &vol,
+                    publ.as_ref(),
+                    owned,
+                    total,
+                    percent,
+                    first_issue_cover,
+                    pool.clone(),
+                );
                 scroll_done.set_child(Some(&content));
                 stack_done.set_visible_child_name("content");
             } else {
@@ -134,14 +196,14 @@ fn build_info_content(
 
     // --- Cabecera: Portada + Datos ---
     let header = gtk::Box::builder().spacing(24).build();
-    
+
     let cover = gtk::Picture::builder()
         .width_request(200)
         .height_request(280)
         .content_fit(gtk::ContentFit::Contain)
         .css_classes(["card"])
         .build();
-    
+
     let volume_thumb = crate::helpers::paths::volume_thumbnail_path(vol.id_volume);
     if volume_thumb.exists() {
         cover.set_filename(Some(&volume_thumb));
@@ -152,24 +214,28 @@ fn build_info_content(
         let cover_clone = cover.clone();
         let url = vol.image_url.clone();
         let vt_path = volume_thumb.clone();
-        run_in_background(tokio::runtime::Handle::current(), async move {
-            if let Ok(resp) = reqwest::get(url).await {
-                if let Ok(bytes) = resp.bytes().await {
-                    if let Some(parent) = vt_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+        run_in_background(
+            tokio::runtime::Handle::current(),
+            async move {
+                if let Ok(resp) = reqwest::get(url).await {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if let Some(parent) = vt_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&vt_path, &bytes);
+                        return Some(vt_path);
                     }
-                    let _ = std::fs::write(&vt_path, &bytes);
-                    return Some(vt_path);
                 }
-            }
-            None
-        }, move |path_opt| {
-            if let Some(path) = path_opt {
-                cover_clone.set_filename(Some(path));
-            }
-        });
+                None
+            },
+            move |path_opt| {
+                if let Some(path) = path_opt {
+                    cover_clone.set_filename(Some(path));
+                }
+            },
+        );
     }
-    
+
     header.append(&cover);
 
     let info_side = gtk::Box::builder()
@@ -177,16 +243,20 @@ fn build_info_content(
         .spacing(12)
         .hexpand(true)
         .build();
-    
-    info_side.append(&gtk::Label::builder()
-        .label(&vol.nombre)
-        .halign(gtk::Align::Start)
-        .css_classes(["title-1"])
-        .wrap(true)
-        .build());
 
-    let stats_group = adw::PreferencesGroup::builder().title("Estadísticas de colección").build();
-    
+    info_side.append(
+        &gtk::Label::builder()
+            .label(&vol.nombre)
+            .halign(gtk::Align::Start)
+            .css_classes(["title-1"])
+            .wrap(true)
+            .build(),
+    );
+
+    let stats_group = adw::PreferencesGroup::builder()
+        .title("Estadísticas de colección")
+        .build();
+
     let id_row = adw::ActionRow::builder()
         .title("ID del Volumen")
         .subtitle(vol.id_volume.to_string())
@@ -243,7 +313,9 @@ fn build_info_content(
 
     // --- Herramientas ---
     {
-        let tools_group = adw::PreferencesGroup::builder().title("Herramientas").build();
+        let tools_group = adw::PreferencesGroup::builder()
+            .title("Herramientas")
+            .build();
 
         // ── Actualizar desde ComicVine ──────────────────────────────────────────
         let update_row = adw::ActionRow::builder()
@@ -331,40 +403,239 @@ fn build_info_content(
             .tooltip_text("Generar embeddings CLIP para este volumen")
             .build();
 
+        let clip_progress_revealer = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .build();
+        let clip_progress_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let clip_progress_title = gtk::Label::builder()
+            .label("Generando embeddings CLIP")
+            .halign(gtk::Align::Start)
+            .css_classes(["heading"])
+            .build();
+        let clip_progress_subtitle = gtk::Label::builder()
+            .label("")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .build();
+        let clip_progress_bar = gtk::ProgressBar::builder()
+            .show_text(true)
+            .hexpand(true)
+            .build();
+        clip_progress_box.append(&clip_progress_title);
+        clip_progress_box.append(&clip_progress_subtitle);
+        clip_progress_box.append(&clip_progress_bar);
+        clip_progress_revealer.set_child(Some(&clip_progress_box));
+
         let volume_id = vol.id_volume;
+        let progress_running = Rc::new(Cell::new(false));
+        let clip_progress_revealer_for_click = clip_progress_revealer.clone();
         clip_btn.connect_clicked(move |btn| {
-            let dialog = adw::AlertDialog::builder()
-                .heading("Generar embeddings CLIP")
-                .body("¿Qué portadas de este volumen quieres indexar?")
-                .build();
-            dialog.add_response("cancel", "Cancelar");
-            dialog.add_response("missing", "Solo faltantes");
-            dialog.add_response("all", "Reindexar todo");
-            dialog.set_default_response(Some("missing"));
-            dialog.set_close_response("cancel");
-            dialog.set_response_appearance("all", adw::ResponseAppearance::Destructive);
+            if progress_running.get() {
+                return;
+            }
 
             let pool_d = pool.clone();
+            let pool_for_dialog = pool.clone();
             let parent_widget = btn.root();
             let overlay_weak = btn.root()
                 .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok())
                 .and_then(|w| w.content())
                 .and_then(|w| w.downcast::<adw::ToastOverlay>().ok())
                 .map(|o| o.downgrade());
+            let btn_for_dialog = btn.clone();
+            let progress_revealer = clip_progress_revealer_for_click.clone();
+            let progress_title = clip_progress_title.clone();
+            let progress_subtitle = clip_progress_subtitle.clone();
+            let progress_bar = clip_progress_bar.clone();
+            let running_flag = progress_running.clone();
 
-            dialog.connect_response(None, move |_d, response| {
-                if response == "cancel" { return; }
-                let solo_faltantes = response != "all";
-                crate::ui::window::run_clip_generation(
-                    Some(volume_id), solo_faltantes, pool_d.clone(), overlay_weak.clone(),
-                );
-            });
+            run_in_background(
+                tokio::runtime::Handle::current(),
+                async move {
+                    let repo = ComicbookInfoRepository::new(&pool_d);
+                    let stats = repo.count_clip_index_stats(Some(volume_id)).await.ok()?;
+                    let total_missing_candidates = repo
+                        .get_covers_for_clip(Some(volume_id), true)
+                        .await
+                        .ok()
+                        .map(|covers| covers.len() as i64)
+                        .unwrap_or(stats.3);
+                    let total_all_candidates = repo
+                        .get_covers_for_clip(Some(volume_id), false)
+                        .await
+                        .ok()
+                        .map(|covers| covers.len() as i64)
+                        .unwrap_or(stats.0);
+                    Some(ClipDialogStats {
+                        total_db: stats.0,
+                        con_archivo: stats.1,
+                        indexadas: stats.2,
+                        total_missing_candidates,
+                        total_all_candidates,
+                    })
+                },
+                move |stats_opt| {
+                    let Some(stats) = stats_opt else {
+                        if let Some(overlay) = overlay_weak.as_ref().and_then(|ow| ow.upgrade()) {
+                            overlay.add_toast(adw::Toast::builder().title("No se pudo calcular el alcance de CLIP").timeout(4).build());
+                        }
+                        return;
+                    };
 
-            dialog.present(parent_widget.as_ref());
+                    let dialog = adw::AlertDialog::builder()
+                        .heading("Generar embeddings CLIP")
+                        .body(build_clip_dialog_body(stats))
+                        .build();
+                    dialog.add_response("cancel", "Cancelar");
+                    dialog.add_response("missing", "Solo faltantes");
+                    dialog.add_response("all", "Reindexar todo");
+                    dialog.set_default_response(Some("missing"));
+                    dialog.set_close_response("cancel");
+                    dialog.set_response_appearance("all", adw::ResponseAppearance::Destructive);
+
+                    let pool_start = pool_for_dialog.clone();
+                    let overlay_start = overlay_weak.clone();
+                    let btn_start = btn_for_dialog.clone();
+                    let progress_revealer_start = progress_revealer.clone();
+                    let progress_title_start = progress_title.clone();
+                    let progress_subtitle_start = progress_subtitle.clone();
+                    let progress_bar_start = progress_bar.clone();
+                    let running_start = running_flag.clone();
+
+                    dialog.connect_response(None, move |_d, response| {
+                        if response == "cancel" {
+                            return;
+                        }
+
+                        let solo_faltantes = response != "all";
+                        let total_target = if solo_faltantes {
+                            stats.total_missing_candidates
+                        } else {
+                            stats.total_all_candidates
+                        };
+
+                        running_start.set(true);
+                        btn_start.set_sensitive(false);
+                        progress_title_start.set_label("Generando embeddings CLIP");
+                        progress_subtitle_start.set_label(&format!(
+                            "0/{} procesados, {} restantes",
+                            total_target,
+                            total_target
+                        ));
+                        progress_bar_start.set_fraction(if total_target > 0 { 0.0 } else { 1.0 });
+                        progress_bar_start.set_text(Some(&format!("0/{}", total_target)));
+                        progress_revealer_start.set_reveal_child(true);
+
+                        let (event_tx, event_rx) = mpsc::channel::<crate::ui::window::ClipGenerationEvent>();
+                        let progress_revealer_poll = progress_revealer_start.clone();
+                        let progress_title_poll = progress_title_start.clone();
+                        let progress_subtitle_poll = progress_subtitle_start.clone();
+                        let progress_bar_poll = progress_bar_start.clone();
+                        let btn_poll = btn_start.clone();
+                        let running_poll = running_start.clone();
+
+                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                            loop {
+                                match event_rx.try_recv() {
+                                    Ok(crate::ui::window::ClipGenerationEvent::Progress(progress)) => {
+                                        let remaining = progress.total.saturating_sub(progress.processed);
+                                        let fraction = if progress.total > 0 {
+                                            progress.processed as f64 / progress.total as f64
+                                        } else {
+                                            1.0
+                                        };
+                                        progress_title_poll.set_label("Generando embeddings CLIP");
+                                        progress_subtitle_poll.set_label(&format!(
+                                            "{}/{} procesados, {} restantes, {} generados, {} errores",
+                                            progress.processed,
+                                            progress.total,
+                                            remaining,
+                                            progress.generated,
+                                            progress.errors
+                                        ));
+                                        progress_bar_poll.set_fraction(fraction);
+                                        progress_bar_poll.set_text(Some(&format!(
+                                            "{}/{}",
+                                            progress.processed,
+                                            progress.total
+                                        )));
+                                    }
+                                    Ok(crate::ui::window::ClipGenerationEvent::Finished { result, stats }) => {
+                                        btn_poll.set_sensitive(true);
+                                        running_poll.set(false);
+
+                                        match result {
+                                            Ok((0, _)) if stats.con_archivo == 0 => {
+                                                progress_title_poll.set_label("Sin portadas descargadas");
+                                                progress_subtitle_poll.set_label(&format!(
+                                                    "Hay {} issues en BD, pero ninguna portada local para indexar.",
+                                                    stats.total
+                                                ));
+                                                progress_bar_poll.set_fraction(0.0);
+                                                progress_bar_poll.set_text(Some("0/0"));
+                                            }
+                                            Ok((generated, errs)) => {
+                                                let status = if errs.is_empty() {
+                                                    "Embeddings CLIP actualizados"
+                                                } else {
+                                                    "Embeddings CLIP finalizados con errores"
+                                                };
+                                                progress_title_poll.set_label(status);
+                                                progress_subtitle_poll.set_label(&format!(
+                                                    "{} generados, {} errores, {} pendientes en el volumen",
+                                                    generated,
+                                                    errs.len(),
+                                                    stats.pendientes.saturating_sub(generated as i64)
+                                                ));
+                                                progress_bar_poll.set_fraction(1.0);
+                                                progress_bar_poll.set_text(Some(&format!("{}", generated)));
+                                            }
+                                            Err(err) => {
+                                                progress_title_poll.set_label("Error generando embeddings CLIP");
+                                                progress_subtitle_poll.set_label(&err);
+                                                progress_bar_poll.set_fraction(0.0);
+                                                progress_bar_poll.set_text(Some("Error"));
+                                            }
+                                        }
+
+                                        progress_revealer_poll.set_reveal_child(true);
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                                    Err(mpsc::TryRecvError::Disconnected) => {
+                                        btn_poll.set_sensitive(true);
+                                        running_poll.set(false);
+                                        return glib::ControlFlow::Break;
+                                    }
+                                }
+                            }
+                        });
+
+                        crate::ui::window::run_clip_generation(
+                            Some(volume_id),
+                            solo_faltantes,
+                            pool_start.clone(),
+                            overlay_start.clone(),
+                            Some(event_tx),
+                        );
+                    });
+
+                    dialog.present(parent_widget.as_ref());
+                },
+            );
         });
 
         clip_row.add_suffix(&clip_btn);
         tools_group.add(&clip_row);
+        tools_group.add(&clip_progress_revealer);
         main_box.append(&tools_group);
     }
 
@@ -373,7 +644,12 @@ fn build_info_content(
 
 // ── Pestaña Issues ─────────────────────────────────────────────────────────────
 
-fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
+fn build_issues_tab(
+    volume_id: i64,
+    volume_name: &str,
+    pool: SqlitePool,
+    tab_view: adw::TabView,
+) -> gtk::Widget {
     let main_vbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(0)
@@ -419,11 +695,11 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
     main_vbox.append(&scroll);
 
     // ── Estado de paginación ──────────────────────────────────────────────────
-    let offset:     Rc<Cell<i64>>  = Rc::new(Cell::new(0));
-    let loading:    Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let offset: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+    let loading: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let all_loaded: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    let query:      Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    let poseidos:   Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let query: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let poseidos: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let v_name = Rc::new(volume_name.to_string());
 
     const PAGE: i64 = 50;
@@ -440,17 +716,19 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
         let v_name = v_name.clone();
 
         move || {
-            if loading.get() { return; }
+            if loading.get() {
+                return;
+            }
             loading.set(true);
 
-            let pool_t   = pool.clone();
-            let wb       = wrap_box.clone();
-            let off      = offset.clone();
-            let load     = loading.clone();
-            let done     = all_loaded.clone();
-            let q        = query.borrow().clone();
-            let solo     = poseidos.get();
-            let cur_off  = offset.get();
+            let pool_t = pool.clone();
+            let wb = wrap_box.clone();
+            let off = offset.clone();
+            let load = loading.clone();
+            let done = all_loaded.clone();
+            let q = query.borrow().clone();
+            let solo = poseidos.get();
+            let cur_off = offset.get();
             let v_name_t = v_name.clone();
             let tv_outer = tab_view.clone();
             let pool_outer = pool.clone();
@@ -459,8 +737,11 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
                 tokio::runtime::Handle::current(),
                 async move {
                     let setup = crate::repositories::SetupRepository::new(&pool_t)
-                        .get().await.unwrap_or_default();
-                    let card_size = crate::helpers::thumbnail::CardSize::from_db(setup.thumbnail_size);
+                        .get()
+                        .await
+                        .unwrap_or_default();
+                    let card_size =
+                        crate::helpers::thumbnail::CardSize::from_db(setup.thumbnail_size);
                     let issues = ComicbookInfoRepository::new(&pool_t)
                         .get_view_by_volume_page(volume_id, PAGE, cur_off, q.as_deref(), solo)
                         .await
@@ -470,20 +751,28 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
                 move |(issues, card_size)| {
                     load.set(false);
                     let received = issues.len() as i64;
-                    if received < PAGE { done.set(true); }
+                    if received < PAGE {
+                        done.set(true);
+                    }
                     off.set(cur_off + received);
 
                     let issues = Rc::new(issues);
-                    let idx    = Rc::new(Cell::new(0usize));
+                    let idx = Rc::new(Cell::new(0usize));
                     const BATCH: usize = 20;
 
                     let tab_view_t = tv_outer.clone();
                     let pool_t2 = pool_outer.clone();
                     glib::idle_add_local(move || {
                         let start = idx.get();
-                        let end   = (start + BATCH).min(issues.len());
+                        let end = (start + BATCH).min(issues.len());
                         for issue in &issues[start..end] {
-                            wb.append(&build_issue_card(issue, &v_name_t, card_size, tab_view_t.clone(), pool_t2.clone()));
+                            wb.append(&build_issue_card(
+                                issue,
+                                &v_name_t,
+                                card_size,
+                                tab_view_t.clone(),
+                                pool_t2.clone(),
+                            ));
                         }
                         idx.set(end);
                         if end >= issues.len() {
@@ -501,13 +790,15 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
 
     // ── Reset + primera carga ─────────────────────────────────────────────────
     let reset = {
-        let wrap_box  = wrap_box.clone();
-        let offset    = offset.clone();
-        let loading   = loading.clone();
+        let wrap_box = wrap_box.clone();
+        let offset = offset.clone();
+        let loading = loading.clone();
         let all_loaded = all_loaded.clone();
-        let loader    = loader.clone();
+        let loader = loader.clone();
         move || {
-            while let Some(c) = wrap_box.first_child() { wrap_box.remove(&c); }
+            while let Some(c) = wrap_box.first_child() {
+                wrap_box.remove(&c);
+            }
             offset.set(0);
             loading.set(false);
             all_loaded.set(false);
@@ -518,8 +809,8 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
 
     // Búsqueda
     {
-        let query   = query.clone();
-        let se      = search_entry.clone();
+        let query = query.clone();
+        let se = search_entry.clone();
         let reset_s = reset.clone();
         search_entry.connect_search_changed(move |_| {
             let text = se.text().to_string();
@@ -531,7 +822,7 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
     // Filtro poseídos
     {
         let poseidos = poseidos.clone();
-        let reset_p  = reset.clone();
+        let reset_p = reset.clone();
         check_poseidos.connect_toggled(move |btn| {
             poseidos.set(btn.is_active());
             reset_p();
@@ -541,11 +832,13 @@ fn build_issues_tab(volume_id: i64, volume_name: &str, pool: SqlitePool, tab_vie
     // Scroll infinito
     {
         let adj = scroll.vadjustment();
-        let loader_s   = loader.clone();
-        let loading_s  = loading.clone();
+        let loader_s = loader.clone();
+        let loading_s = loading.clone();
         let all_done_s = all_loaded.clone();
         adj.connect_value_changed(move |adj| {
-            if loading_s.get() || all_done_s.get() { return; }
+            if loading_s.get() || all_done_s.get() {
+                return;
+            }
             if adj.value() + adj.page_size() >= adj.upper() - 400.0 {
                 loader_s.clone()();
             }
@@ -586,7 +879,10 @@ fn build_issue_card(
     gesture.connect_pressed(move |g, n_press, _, _| {
         if n_press == 2 {
             g.set_state(gtk::EventSequenceState::Claimed);
-            let new_page = crate::ui::window::add_tab(&tv, crate::ui::window::TabKind::IssueDetail(id_info, pool_click.clone()));
+            let new_page = crate::ui::window::add_tab(
+                &tv,
+                crate::ui::window::TabKind::IssueDetail(id_info, pool_click.clone()),
+            );
             tv.set_selected_page(&new_page);
         }
     });
@@ -647,21 +943,27 @@ fn build_issue_card(
         .build();
 
     let num = view.info.numero.as_deref().unwrap_or("?");
-    extra_info.append(&gtk::Label::builder()
-        .label(&format!("#{}", num))
-        .css_classes(["dim-label", "caption"])
-        .build());
+    extra_info.append(
+        &gtk::Label::builder()
+            .label(&format!("#{}", num))
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
 
     if view.physical_count > 0 {
-        extra_info.append(&gtk::Label::builder()
-            .label(&format!("{} físico", view.physical_count))
-            .css_classes(["caption", "success"])
-            .build());
+        extra_info.append(
+            &gtk::Label::builder()
+                .label(&format!("{} físico", view.physical_count))
+                .css_classes(["caption", "success"])
+                .build(),
+        );
     } else {
-        extra_info.append(&gtk::Label::builder()
-            .label("No poseído")
-            .css_classes(["caption", "dim-label"])
-            .build());
+        extra_info.append(
+            &gtk::Label::builder()
+                .label("No poseído")
+                .css_classes(["caption", "dim-label"])
+                .build(),
+        );
     }
 
     info_box.append(&extra_info);
@@ -683,7 +985,8 @@ fn build_issue_card(
                 url_original.as_deref(),
                 &volume_name_owned,
                 id_vol,
-            ).await;
+            )
+            .await;
 
             // Escalar a la altura del card_size para que el WrapBox calcule bien el ancho
             let raw = raw?;
@@ -691,9 +994,16 @@ fn build_issue_card(
                 let img = image::load_from_memory(&raw).ok()?;
                 let scaled = img.resize(u32::MAX, ch, image::imageops::FilterType::Triangle);
                 let mut out = Vec::new();
-                scaled.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).ok()?;
+                scaled
+                    .write_to(
+                        &mut std::io::Cursor::new(&mut out),
+                        image::ImageFormat::Jpeg,
+                    )
+                    .ok()?;
                 Some(out)
-            }).await.ok()?
+            })
+            .await
+            .ok()?
         },
         move |bytes_opt| {
             if let Some(bytes) = bytes_opt {
@@ -711,7 +1021,7 @@ fn build_issue_card(
                     }
                 }
             }
-        }
+        },
     );
 
     card.upcast()

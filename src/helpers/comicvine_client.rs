@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -13,10 +13,10 @@ const REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 fn resource_prefix(resource_type: &str) -> Option<&'static str> {
     match resource_type {
-        "volume"    => Some("4050-"),
-        "publisher" => Some("4010-"),  // Prefijo real de publishers en Comic Vine
+        "volume" => Some("4050-"),
+        "publisher" => Some("4010-"), // Prefijo real de publishers en Comic Vine
         "character" => Some("4005-"),
-        "issue"     => Some("4000-"),
+        "issue" => Some("4000-"),
         _ => None,
     }
 }
@@ -84,7 +84,7 @@ impl ComicVineClient {
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
-            .cookie_store(true)          // gestiona cookies de sesión automáticamente
+            .cookie_store(true) // gestiona cookies de sesión automáticamente
             .timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .build()?;
@@ -93,9 +93,7 @@ impl ComicVineClient {
             api_key: Arc::new(api_key),
             base_url: Arc::new(base),
             client,
-            last_request: Arc::new(Mutex::new(
-                Instant::now() - REQUEST_INTERVAL,
-            )),
+            last_request: Arc::new(Mutex::new(Instant::now() - REQUEST_INTERVAL)),
         })
     }
 
@@ -118,10 +116,7 @@ impl ComicVineClient {
             format!("{}/", endpoint)
         };
 
-        let mut url = format!(
-            "{}{}?api_key={}",
-            self.base_url, endpoint_fmt, self.api_key
-        );
+        let mut url = format!("{}{}?api_key={}", self.base_url, endpoint_fmt, self.api_key);
         for (k, v) in params {
             // Saneamiento simple: ComicVine necesita los espacios como %20
             // pero NO queremos que otros caracteres como : o , se codifiquen
@@ -151,7 +146,10 @@ impl ComicVineClient {
         let status = response.status();
         if !status.is_success() {
             // Leer el cuerpo para ver el mensaje de error de la API
-            let body = response.text().await.unwrap_or_else(|_| "<sin cuerpo>".into());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<sin cuerpo>".into());
             tracing::error!("ComicVine error HTTP {} para {}: {}", status, url, body);
             return None;
         }
@@ -223,11 +221,7 @@ impl ComicVineClient {
 
     // ── Volumes ───────────────────────────────────────────────────────────────
 
-    pub async fn get_volumes(
-        &self,
-        query: Option<&str>,
-        publisher_id: Option<&str>,
-    ) -> Vec<Value> {
+    pub async fn get_volumes(&self, query: Option<&str>, publisher_id: Option<&str>) -> Vec<Value> {
         let filter_str = build_filter(&[
             query.map(|q| format!("name:{}", sanitize_query(q))),
             publisher_id.map(|p| format!("publisher:{}", p)),
@@ -240,9 +234,7 @@ impl ComicVineClient {
             None => return vec![],
         };
 
-        let total = first_data["number_of_total_results"]
-            .as_u64()
-            .unwrap_or(0) as usize;
+        let total = first_data["number_of_total_results"].as_u64().unwrap_or(0) as usize;
 
         let mut all: Vec<Value> = first_data["results"]
             .as_array()
@@ -319,9 +311,7 @@ impl ComicVineClient {
 
     pub async fn get_issue_details(&self, issue_id: &str) -> Option<Value> {
         let id = format_resource_id(issue_id, "issue");
-        let data = self
-            .make_request(&format!("issue/{}/", id), vec![])
-            .await?;
+        let data = self.make_request(&format!("issue/{}/", id), vec![]).await?;
         Some(data["results"].clone())
     }
 
@@ -458,10 +448,10 @@ fn build_filter(parts: &[Option<String>]) -> String {
 
 /// Construye los params comunes de paginación con filtro opcional.
 fn page_params(limit: usize, offset: usize, filter: &str) -> Params {
-    let mut params: Params = vec!(
+    let mut params: Params = vec![
         ("limit".into(), limit.to_string()),
         ("offset".into(), offset.to_string()),
-    );
+    ];
     if !filter.is_empty() {
         params.push(("filter".into(), filter.to_string()));
     }
@@ -475,21 +465,21 @@ mod tests {
     #[test]
     fn print_comicvine_query_url() {
         // Para que la URL sea funcional en tu navegador, pon tu API Key aquí.
-        let api_key = "TU_API_KEY_AQUI"; 
+        let api_key = "TU_API_KEY_AQUI";
         let client = ComicVineClient::new(api_key, None).unwrap();
-        
+
         // Simular búsqueda de "The Amazing Spider-Man" en Marvel (ID 31)
         let query = Some("The Amazing Spider-Man");
         let publisher_id = Some("31");
-        
+
         let filter_str = build_filter(&[
             query.map(|q| format!("name:{}", q)),
             publisher_id.map(|p| format!("publisher:{}", p)),
         ]);
-        
+
         let params = page_params(100, 0, &filter_str);
         let url = client.build_url("volumes/", &params);
-        
+
         println!("\n\n🔗 --- COPIA ESTA URL AL NAVEGADOR (VOLÚMENES) ---");
         println!("{}", url);
         println!("--------------------------------------\n");
@@ -497,9 +487,9 @@ mod tests {
 
     #[test]
     fn print_publisher_query_url() {
-        let api_key = "TU_API_KEY_AQUI"; 
+        let api_key = "TU_API_KEY_AQUI";
         let client = ComicVineClient::new(api_key, None).unwrap();
-        
+
         // Simular búsqueda de la editorial "DC Comics"
         let name_filter = Some("DC Comics");
         let mut params: Params = vec![
@@ -511,7 +501,7 @@ mod tests {
         }
 
         let url = client.build_url("publishers/", &params);
-        
+
         println!("\n\n🔗 --- COPIA ESTA URL AL NAVEGADOR (EDITORIALES) ---");
         println!("{}", url);
         println!("--------------------------------------\n");
