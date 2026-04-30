@@ -10,7 +10,11 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 
+use sqlx::SqlitePool;
+
 use babelcomics_core::helpers::{extraction_registry, extractor, thumbnail};
+use babelcomics_core::helpers::thumbnail::ReaderFilter;
+use babelcomics_core::repositories::SetupRepository;
 use crate::ui::run_in_background;
 
 /// Número de thumbnails que se generan en paralelo.
@@ -94,10 +98,12 @@ pub struct ReaderWindow {
     // Smart scroll
     scroll_accumulator: Rc<Cell<f64>>,
     last_scroll_time: Rc<Cell<Instant>>,
+
+    reader_filter: Rc<Cell<ReaderFilter>>,
 }
 
 impl ReaderWindow {
-    pub fn open(app: &adw::Application, path: &str) {
+    pub fn open(app: &adw::Application, path: &str, pool: Option<SqlitePool>) {
         let path_buf = PathBuf::from(path);
         let title = path_buf
             .file_name()
@@ -220,6 +226,27 @@ impl ReaderWindow {
 
         win.set_content(Some(&sidebar_view));
 
+        let reader_filter = Rc::new(Cell::new(ReaderFilter::default()));
+
+        // Load reader filter from DB in background; thumbnails generated after this
+        // completes will use the stored preference.
+        if let Some(p) = pool {
+            let filter_cell = reader_filter.clone();
+            run_in_background(
+                tokio::runtime::Handle::current(),
+                async move {
+                    SetupRepository::new(&p)
+                        .get()
+                        .await
+                        .map(|s| ReaderFilter::from_db(s.reader_filter))
+                        .unwrap_or_default()
+                },
+                move |filter| {
+                    filter_cell.set(filter);
+                },
+            );
+        }
+
         let reader = Rc::new(Self {
             win: win.clone(),
             image,
@@ -242,6 +269,7 @@ impl ReaderWindow {
             alive: Rc::new(Cell::new(true)),
             scroll_accumulator: Rc::new(Cell::new(0.0)),
             last_scroll_time: Rc::new(Cell::new(Instant::now())),
+            reader_filter,
         });
 
         reader.setup_logic(&btn_fullscreen, &menu_button);
@@ -341,7 +369,7 @@ impl ReaderWindow {
 
         run_in_background(
             tokio::runtime::Handle::current(),
-            thumbnail::load_page_thumb(comic_path, page_name, temp_dir, thumb_path),
+            thumbnail::load_page_thumb(comic_path, page_name, temp_dir, thumb_path, self.reader_filter.get()),
             move |res| {
                 if !r.alive.get() {
                     return;
@@ -656,6 +684,7 @@ impl ReaderWindow {
             alive: self.alive.clone(),
             scroll_accumulator: self.scroll_accumulator.clone(),
             last_scroll_time: self.last_scroll_time.clone(),
+            reader_filter: self.reader_filter.clone(),
         }
     }
 }

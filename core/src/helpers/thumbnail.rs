@@ -3,6 +3,48 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use image::{ImageFormat, imageops::FilterType};
 
+/// Algoritmo de escalado usado para los thumbnails del lector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReaderFilter {
+    Nearest,
+    Triangle,
+    CatmullRom,
+    #[default]
+    Lanczos3,
+}
+
+impl ReaderFilter {
+    pub fn from_db(val: i64) -> Self {
+        match val {
+            0 => Self::Nearest,
+            1 => Self::Triangle,
+            2 => Self::CatmullRom,
+            _ => Self::Lanczos3,
+        }
+    }
+
+    pub fn to_db(self) -> i64 {
+        match self {
+            Self::Nearest    => 0,
+            Self::Triangle   => 1,
+            Self::CatmullRom => 2,
+            Self::Lanczos3   => 3,
+        }
+    }
+
+    pub fn combo_index(self) -> u32 { self.to_db() as u32 }
+    pub fn from_combo_index(idx: u32) -> Self { Self::from_db(idx as i64) }
+
+    fn to_filter_type(self) -> FilterType {
+        match self {
+            Self::Nearest    => FilterType::Nearest,
+            Self::Triangle   => FilterType::Triangle,
+            Self::CatmullRom => FilterType::CatmullRom,
+            Self::Lanczos3   => FilterType::Lanczos3,
+        }
+    }
+}
+
 /// Los tres tamaños de card soportados por el sistema.
 /// Cada variante define las dimensiones exactas de la card en la UI
 /// y el tamaño del thumbnail que se genera en disco.
@@ -186,6 +228,7 @@ pub async fn load_page_thumb(
     page_name: String,
     pages_dir: PathBuf,
     thumb_path: PathBuf,
+    filter: ReaderFilter,
 ) -> Result<PageThumb> {
     use crate::helpers::extractor::extract_page_to_memory;
 
@@ -207,7 +250,7 @@ pub async fn load_page_thumb(
                 img
             };
 
-            let thumb = img.resize(160, u32::MAX, FilterType::Lanczos3);
+            let thumb = img.resize(160, u32::MAX, filter.to_filter_type());
             drop(img);
 
             if let Some(parent) = thumb_path.parent() {

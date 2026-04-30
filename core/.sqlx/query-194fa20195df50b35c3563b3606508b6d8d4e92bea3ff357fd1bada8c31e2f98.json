@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                setupkey as \"setupkey!: String\",\n                api_key_encrypted,\n                modo_oscuro as \"modo_oscuro!: bool\",\n                thumbnail_size as \"thumbnail_size!: i64\",\n                items_por_pagina as \"items_por_pagina!: i64\",\n                num_workers as \"num_workers!: i64\",\n                idioma,\n                carpeta_thumbnails,\n                intervalo_api as \"intervalo_api!: f64\",\n                api_url,\n                clip_al_arranque as \"clip_al_arranque!: bool\",\n                reader_filter as \"reader_filter!: i64\"\n               FROM setups WHERE setupkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "setupkey!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "api_key_encrypted",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "modo_oscuro!: bool",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "thumbnail_size!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "items_por_pagina!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "num_workers!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "idioma",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "carpeta_thumbnails",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "intervalo_api!: f64",
+        "ordinal": 8,
+        "type_info": "Float"
+      },
+      {
+        "name": "api_url",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "clip_al_arranque!: bool",
+        "ordinal": 10,
+        "type_info": "Bool"
+      },
+      {
+        "name": "reader_filter!: i64",
+        "ordinal": 11,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "194fa20195df50b35c3563b3606508b6d8d4e92bea3ff357fd1bada8c31e2f98"
+}

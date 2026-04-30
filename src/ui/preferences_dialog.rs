@@ -8,7 +8,7 @@ use gtk4::{self as gtk, gio};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use babelcomics_core::helpers::{comicvine_client::ComicVineClient, paths, scan_service, thumbnail::CardSize};
+use babelcomics_core::helpers::{comicvine_client::ComicVineClient, paths, scan_service, thumbnail::{CardSize, ReaderFilter}};
 use babelcomics_core::repositories::SetupRepository;
 use crate::ui;
 
@@ -405,10 +405,59 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
     )));
     group_interfaz.add(&row_scroll_cd);
 
+    // Grupo: Lector
+    let group_lector = adw::PreferencesGroup::builder().title("Lector").build();
+
+    let row_reader_filter = adw::ComboRow::builder()
+        .title("Algoritmo de escalado de páginas")
+        .subtitle("Calidad al generar miniaturas de páginas en el lector")
+        .build();
+    let reader_filter_model = gtk::StringList::new(&["Nearest (más rápido)", "Bilineal", "CatmullRom", "Lanczos3 (mejor calidad)"]);
+    row_reader_filter.set_model(Some(&reader_filter_model));
+    group_lector.add(&row_reader_filter);
+
+    // Cargar valor guardado en BD
+    {
+        let row = row_reader_filter.clone();
+        let pool_rf = pool.clone();
+        run_in_background(
+            tokio::runtime::Handle::current(),
+            async move {
+                SetupRepository::new(&pool_rf)
+                    .get()
+                    .await
+                    .map(|s| s.reader_filter)
+                    .unwrap_or(3)
+            },
+            move |val| {
+                row.set_selected(ReaderFilter::from_db(val).combo_index());
+            },
+        );
+    }
+
+    // Guardar en BD cuando el usuario cambia la selección
+    {
+        let pool_rf = pool.clone();
+        row_reader_filter.connect_selected_notify(move |row| {
+            let filter = ReaderFilter::from_combo_index(row.selected()).to_db();
+            let pool_task = pool_rf.clone();
+            run_in_background(
+                tokio::runtime::Handle::current(),
+                async move { SetupRepository::new(&pool_task).set_reader_filter(filter).await },
+                |result| {
+                    if let Err(e) = result {
+                        tracing::error!("Error guardando filtro de lector: {e}");
+                    }
+                },
+            );
+        });
+    }
+
     page_general.add(&group_api);
     page_general.add(&group_dirs);
     page_general.add(&group_dir_list);
     page_general.add(&group_interfaz);
+    page_general.add(&group_lector);
     dialog.add(&page_general);
 
     // ── PÁGINA 2: AVANZADO ───────────────────────────────────────────────────

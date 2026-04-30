@@ -20,12 +20,19 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 # Error handling
 anyhow = "1"
 
+# Serialization / prototype persistence
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Paralelismo (configuración del pool global en main.rs)
 rayon = "1"
+
+# Image processing for TSF prototype
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 
 
 # UI GTK4 + libadwaita

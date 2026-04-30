@@ -1,0 +1,493 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d562d05..de8a20b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -200,8 +200,11 @@ dependencies = [
+  "gio",
+  "glib",
+  "gtk4",
++ "image",
+  "libadwaita",
+  "rayon",
++ "serde",
++ "serde_json",
+  "sqlx",
+  "tokio",
+  "tracing",
+diff --git a/Cargo.toml b/Cargo.toml
+index 1ed87f2..d36d3a1 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -20,6 +20,10 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+ # Error handling
+ anyhow = "1"
+ 
++# Serialization / prototype persistence
++serde = { version = "1", features = ["derive"] }
++serde_json = "1"
++
+ # Logging
+ tracing = "0.1"
+ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+@@ -27,6 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ # Paralelismo (configuración del pool global en main.rs)
+ rayon = "1"
+ 
++# Image processing for TSF prototype
++image = { version = "0.25", features = ["jpeg", "png", "webp"] }
++
+ 
+ # UI GTK4 + libadwaita
+ gtk4 = { version = "0.9", features = ["v4_16"] }
+diff --git a/core/src/helpers/thumbnail.rs b/core/src/helpers/thumbnail.rs
+index cd19916..e48afa9 100644
+--- a/core/src/helpers/thumbnail.rs
++++ b/core/src/helpers/thumbnail.rs
+@@ -3,6 +3,48 @@ use std::path::{Path, PathBuf};
+ use anyhow::{Context, Result};
+ use image::{ImageFormat, imageops::FilterType};
+ 
++/// Algoritmo de escalado usado para los thumbnails del lector.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub enum ReaderFilter {
++    Nearest,
++    Triangle,
++    CatmullRom,
++    #[default]
++    Lanczos3,
++}
++
++impl ReaderFilter {
++    pub fn from_db(val: i64) -> Self {
++        match val {
++            0 => Self::Nearest,
++            1 => Self::Triangle,
++            2 => Self::CatmullRom,
++            _ => Self::Lanczos3,
++        }
++    }
++
++    pub fn to_db(self) -> i64 {
++        match self {
++            Self::Nearest    => 0,
++            Self::Triangle   => 1,
++            Self::CatmullRom => 2,
++            Self::Lanczos3   => 3,
++        }
++    }
++
++    pub fn combo_index(self) -> u32 { self.to_db() as u32 }
++    pub fn from_combo_index(idx: u32) -> Self { Self::from_db(idx as i64) }
++
++    fn to_filter_type(self) -> FilterType {
++        match self {
++            Self::Nearest    => FilterType::Nearest,
++            Self::Triangle   => FilterType::Triangle,
++            Self::CatmullRom => FilterType::CatmullRom,
++            Self::Lanczos3   => FilterType::Lanczos3,
++        }
++    }
++}
++
+ /// Los tres tamaños de card soportados por el sistema.
+ /// Cada variante define las dimensiones exactas de la card en la UI
+ /// y el tamaño del thumbnail que se genera en disco.
+@@ -186,6 +228,7 @@ pub async fn load_page_thumb(
+     page_name: String,
+     pages_dir: PathBuf,
+     thumb_path: PathBuf,
++    filter: ReaderFilter,
+ ) -> Result<PageThumb> {
+     use crate::helpers::extractor::extract_page_to_memory;
+ 
+@@ -207,7 +250,7 @@ pub async fn load_page_thumb(
+                 img
+             };
+ 
+-            let thumb = img.resize(160, u32::MAX, FilterType::Lanczos3);
++            let thumb = img.resize(160, u32::MAX, filter.to_filter_type());
+             drop(img);
+ 
+             if let Some(parent) = thumb_path.parent() {
+diff --git a/core/src/models/setup.rs b/core/src/models/setup.rs
+index e47eeb0..76ccfff 100644
+--- a/core/src/models/setup.rs
++++ b/core/src/models/setup.rs
+@@ -13,6 +13,7 @@ pub struct Setup {
+     pub intervalo_api: f64,
+     pub api_url: Option<String>,
+     pub clip_al_arranque: bool,
++    pub reader_filter: i64,
+ }
+ 
+ impl Default for Setup {
+@@ -29,6 +30,7 @@ impl Default for Setup {
+             intervalo_api: 0.5,
+             api_url: Some("https://comicvine.gamespot.com/api/".to_string()),
+             clip_al_arranque: true,
++            reader_filter: 3,
+         }
+     }
+ }
+diff --git a/core/src/repositories/setup_repository.rs b/core/src/repositories/setup_repository.rs
+index 1aa33d4..423719a 100644
+--- a/core/src/repositories/setup_repository.rs
++++ b/core/src/repositories/setup_repository.rs
+@@ -28,7 +28,8 @@ impl<'a> SetupRepository<'a> {
+                 carpeta_thumbnails,
+                 intervalo_api as "intervalo_api!: f64",
+                 api_url,
+-                clip_al_arranque as "clip_al_arranque!: bool"
++                clip_al_arranque as "clip_al_arranque!: bool",
++                reader_filter as "reader_filter!: i64"
+                FROM setups WHERE setupkey = ?"#,
+             DEFAULT_KEY
+         )
+@@ -41,8 +42,8 @@ impl<'a> SetupRepository<'a> {
+     pub async fn save(&self, setup: &Setup) -> Result<()> {
+         sqlx::query!(
+             r#"INSERT INTO setups
+-                (setupkey, api_key_encrypted, modo_oscuro, thumbnail_size, items_por_pagina, num_workers, idioma, carpeta_thumbnails, intervalo_api, api_url, clip_al_arranque)
+-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++                (setupkey, api_key_encrypted, modo_oscuro, thumbnail_size, items_por_pagina, num_workers, idioma, carpeta_thumbnails, intervalo_api, api_url, clip_al_arranque, reader_filter)
++               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(setupkey) DO UPDATE SET
+                 api_key_encrypted  = excluded.api_key_encrypted,
+                 modo_oscuro        = excluded.modo_oscuro,
+@@ -53,7 +54,8 @@ impl<'a> SetupRepository<'a> {
+                 carpeta_thumbnails = excluded.carpeta_thumbnails,
+                 intervalo_api      = excluded.intervalo_api,
+                 api_url            = excluded.api_url,
+-                clip_al_arranque   = excluded.clip_al_arranque"#,
++                clip_al_arranque   = excluded.clip_al_arranque,
++                reader_filter      = excluded.reader_filter"#,
+             setup.setupkey,
+             setup.api_key_encrypted,
+             setup.modo_oscuro,
+@@ -64,7 +66,8 @@ impl<'a> SetupRepository<'a> {
+             setup.carpeta_thumbnails,
+             setup.intervalo_api,
+             setup.api_url,
+-            setup.clip_al_arranque
++            setup.clip_al_arranque,
++            setup.reader_filter
+         )
+         .execute(self.pool)
+         .await?;
+@@ -93,6 +96,17 @@ impl<'a> SetupRepository<'a> {
+         Ok(())
+     }
+ 
++    pub async fn set_reader_filter(&self, filter: i64) -> Result<()> {
++        sqlx::query!(
++            "UPDATE setups SET reader_filter = ? WHERE setupkey = ?",
++            filter,
++            DEFAULT_KEY
++        )
++        .execute(self.pool)
++        .await?;
++        Ok(())
++    }
++
+     pub async fn set_carpeta_thumbnails(&self, path: Option<&str>) -> Result<()> {
+         sqlx::query!(
+             "UPDATE setups SET carpeta_thumbnails = ? WHERE setupkey = ?",
+diff --git a/src/app.rs b/src/app.rs
+index ef3d544..6ed91f4 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -23,6 +23,7 @@ pub fn run(pool: SqlitePool) {
+     let _ = pool_cell.set(pool);
+ 
+     let pool_cell2 = pool_cell.clone();
++    let pool_cell_open = pool_cell.clone();
+ 
+     // Señal OPEN: se dispara cuando el sistema pide abrir archivos (ej: doble clic en Nautilus)
+     {
+@@ -30,7 +31,8 @@ pub fn run(pool: SqlitePool) {
+             for file in files {
+                 if let Some(path) = file.path() {
+                     let path_str = path.to_string_lossy().to_string();
+-                    reader::ReaderWindow::open(app, &path_str);
++                    let pool = pool_cell_open.get().cloned();
++                    reader::ReaderWindow::open(app, &path_str, pool);
+                 }
+             }
+         });
+@@ -61,7 +63,8 @@ pub fn run(pool: SqlitePool) {
+             // Verificar si el archivo existe antes de intentar abrirlo
+             if std::path::Path::new(path).exists() {
+                 tracing::info!("Abriendo comic desde argumento: {}", path);
+-                reader::ReaderWindow::open(app, path);
++                let pool = pool_cell2.get().cloned();
++                reader::ReaderWindow::open(app, path, pool);
+                 return;
+             }
+         }
+diff --git a/src/bin/reader.rs b/src/bin/reader.rs
+index d4bb734..f10528e 100644
+--- a/src/bin/reader.rs
++++ b/src/bin/reader.rs
+@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
+                 }
+ 
+                 tracing::info!("Abriendo comic: {}", path);
+-                ReaderWindow::open(app, path);
++                ReaderWindow::open(app, path, None);
+             } else {
+                 eprintln!("Error: Archivo no encontrado: {}", path);
+                 std::process::exit(1);
+@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
+         for file in files {
+             if let Some(path) = file.path() {
+                 let path_str = path.to_string_lossy().to_string();
+-                ReaderWindow::open(app, &path_str);
++                ReaderWindow::open(app, &path_str, None);
+             }
+         }
+     });
+diff --git a/src/ui/pages/catalogacion_inteligente.rs b/src/ui/pages/catalogacion_inteligente.rs
+index 9db0f88..b576806 100644
+--- a/src/ui/pages/catalogacion_inteligente.rs
++++ b/src/ui/pages/catalogacion_inteligente.rs
+@@ -55,6 +55,11 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
+         .sensitive(false)
+         .build();
+     header.pack_end(&apply_btn);
++
++    let skip_btn = gtk::Button::builder()
++        .label("Omitir")
++        .build();
++    header.pack_end(&skip_btn);
+     toolbar.add_top_bar(&header);
+ 
+     let paned = gtk::Paned::builder()
+@@ -287,6 +292,23 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
+         });
+     }
+ 
++    // ── Skip logic ──────────────────────────────────────────────────────────
++    {
++        let comic_views = comic_views.clone();
++        let current_idx = current_idx.clone();
++        let left_list = left_list.clone();
++
++        skip_btn.connect_clicked(move |_| {
++            let idx = current_idx.get();
++            let total = comic_views.borrow().len();
++            if idx + 1 < total {
++                if let Some(row) = left_list.row_at_index((idx + 1) as i32) {
++                    left_list.select_row(Some(&row));
++                }
++            }
++        });
++    }
++
+     // ── Apply logic ──────────────────────────────────────────────────────────
+     {
+         let comic_views = comic_views.clone();
+diff --git a/src/ui/pages/comic_detail.rs b/src/ui/pages/comic_detail.rs
+index d8aab4d..e4d9140 100644
+--- a/src/ui/pages/comic_detail.rs
++++ b/src/ui/pages/comic_detail.rs
+@@ -335,6 +335,7 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget
+ 
+     // Botón LEER (Lanzar lector independiente)
+     let path_for_reader = comic.path.clone();
++    let pool_for_reader = pool.clone();
+     let read_btn = gtk::Button::builder()
+         .label("Leer")
+         .icon_name("book-open-symbolic")
+@@ -346,7 +347,7 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget
+             return;
+         };
+         if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
+-            crate::ui::reader::ReaderWindow::open(adw_app, &path_for_reader);
++            crate::ui::reader::ReaderWindow::open(adw_app, &path_for_reader, Some(pool_for_reader.clone()));
+         }
+     });
+     action_box.append(&read_btn);
+diff --git a/src/ui/pages/issue_detail.rs b/src/ui/pages/issue_detail.rs
+index 3e51878..45a8995 100644
+--- a/src/ui/pages/issue_detail.rs
++++ b/src/ui/pages/issue_detail.rs
+@@ -106,7 +106,7 @@ fn build_content(
+     covers: Vec<ComicbookInfoCover>,
+     physical: Vec<Comicbook>,
+     _card_size: CardSize,
+-    _pool: SqlitePool,
++    pool: SqlitePool,
+     volume_name: &str,
+ ) -> gtk::Widget {
+     let main_box = gtk::Box::builder()
+@@ -311,12 +311,13 @@ fn build_content(
+                 .build();
+ 
+             let path_clone = cb.path.clone();
++            let pool_clone = pool.clone();
+             btn_read.connect_clicked(move |_| {
+                 let Some(app) = gio::Application::default() else {
+                     return;
+                 };
+                 if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
+-                    crate::ui::reader::ReaderWindow::open(adw_app, &path_clone);
++                    crate::ui::reader::ReaderWindow::open(adw_app, &path_clone, Some(pool_clone.clone()));
+                 }
+             });
+             row.add_suffix(&btn_read);
+diff --git a/src/ui/preferences_dialog.rs b/src/ui/preferences_dialog.rs
+index 4b54a73..a5ecafc 100644
+--- a/src/ui/preferences_dialog.rs
++++ b/src/ui/preferences_dialog.rs
+@@ -8,7 +8,7 @@ use gtk4::{self as gtk, gio};
+ use libadwaita as adw;
+ use sqlx::SqlitePool;
+ 
+-use babelcomics_core::helpers::{comicvine_client::ComicVineClient, paths, scan_service, thumbnail::CardSize};
++use babelcomics_core::helpers::{comicvine_client::ComicVineClient, paths, scan_service, thumbnail::{CardSize, ReaderFilter}};
+ use babelcomics_core::repositories::SetupRepository;
+ use crate::ui;
+ 
+@@ -405,10 +405,59 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
+     )));
+     group_interfaz.add(&row_scroll_cd);
+ 
++    // Grupo: Lector
++    let group_lector = adw::PreferencesGroup::builder().title("Lector").build();
++
++    let row_reader_filter = adw::ComboRow::builder()
++        .title("Algoritmo de escalado de páginas")
++        .subtitle("Calidad al generar miniaturas de páginas en el lector")
++        .build();
++    let reader_filter_model = gtk::StringList::new(&["Nearest (más rápido)", "Bilineal", "CatmullRom", "Lanczos3 (mejor calidad)"]);
++    row_reader_filter.set_model(Some(&reader_filter_model));
++    group_lector.add(&row_reader_filter);
++
++    // Cargar valor guardado en BD
++    {
++        let row = row_reader_filter.clone();
++        let pool_rf = pool.clone();
++        run_in_background(
++            tokio::runtime::Handle::current(),
++            async move {
++                SetupRepository::new(&pool_rf)
++                    .get()
++                    .await
++                    .map(|s| s.reader_filter)
++                    .unwrap_or(3)
++            },
++            move |val| {
++                row.set_selected(ReaderFilter::from_db(val).combo_index());
++            },
++        );
++    }
++
++    // Guardar en BD cuando el usuario cambia la selección
++    {
++        let pool_rf = pool.clone();
++        row_reader_filter.connect_selected_notify(move |row| {
++            let filter = ReaderFilter::from_combo_index(row.selected()).to_db();
++            let pool_task = pool_rf.clone();
++            run_in_background(
++                tokio::runtime::Handle::current(),
++                async move { SetupRepository::new(&pool_task).set_reader_filter(filter).await },
++                |result| {
++                    if let Err(e) = result {
++                        tracing::error!("Error guardando filtro de lector: {e}");
++                    }
++                },
++            );
++        });
++    }
++
+     page_general.add(&group_api);
+     page_general.add(&group_dirs);
+     page_general.add(&group_dir_list);
+     page_general.add(&group_interfaz);
++    page_general.add(&group_lector);
+     dialog.add(&page_general);
+ 
+     // ── PÁGINA 2: AVANZADO ───────────────────────────────────────────────────
+diff --git a/src/ui/reader.rs b/src/ui/reader.rs
+index 3c59a06..364843d 100644
+--- a/src/ui/reader.rs
++++ b/src/ui/reader.rs
+@@ -10,7 +10,11 @@ use gtk4::prelude::*;
+ use gtk4::{self as gtk, gio, glib};
+ use libadwaita as adw;
+ 
++use sqlx::SqlitePool;
++
+ use babelcomics_core::helpers::{extraction_registry, extractor, thumbnail};
++use babelcomics_core::helpers::thumbnail::ReaderFilter;
++use babelcomics_core::repositories::SetupRepository;
+ use crate::ui::run_in_background;
+ 
+ /// Número de thumbnails que se generan en paralelo.
+@@ -94,10 +98,12 @@ pub struct ReaderWindow {
+     // Smart scroll
+     scroll_accumulator: Rc<Cell<f64>>,
+     last_scroll_time: Rc<Cell<Instant>>,
++
++    reader_filter: Rc<Cell<ReaderFilter>>,
+ }
+ 
+ impl ReaderWindow {
+-    pub fn open(app: &adw::Application, path: &str) {
++    pub fn open(app: &adw::Application, path: &str, pool: Option<SqlitePool>) {
+         let path_buf = PathBuf::from(path);
+         let title = path_buf
+             .file_name()
+@@ -220,6 +226,27 @@ impl ReaderWindow {
+ 
+         win.set_content(Some(&sidebar_view));
+ 
++        let reader_filter = Rc::new(Cell::new(ReaderFilter::default()));
++
++        // Load reader filter from DB in background; thumbnails generated after this
++        // completes will use the stored preference.
++        if let Some(p) = pool {
++            let filter_cell = reader_filter.clone();
++            run_in_background(
++                tokio::runtime::Handle::current(),
++                async move {
++                    SetupRepository::new(&p)
++                        .get()
++                        .await
++                        .map(|s| ReaderFilter::from_db(s.reader_filter))
++                        .unwrap_or_default()
++                },
++                move |filter| {
++                    filter_cell.set(filter);
++                },
++            );
++        }
++
+         let reader = Rc::new(Self {
+             win: win.clone(),
+             image,
+@@ -242,6 +269,7 @@ impl ReaderWindow {
+             alive: Rc::new(Cell::new(true)),
+             scroll_accumulator: Rc::new(Cell::new(0.0)),
+             last_scroll_time: Rc::new(Cell::new(Instant::now())),
++            reader_filter,
+         });
+ 
+         reader.setup_logic(&btn_fullscreen, &menu_button);
+@@ -341,7 +369,7 @@ impl ReaderWindow {
+ 
+         run_in_background(
+             tokio::runtime::Handle::current(),
+-            thumbnail::load_page_thumb(comic_path, page_name, temp_dir, thumb_path),
++            thumbnail::load_page_thumb(comic_path, page_name, temp_dir, thumb_path, self.reader_filter.get()),
+             move |res| {
+                 if !r.alive.get() {
+                     return;
+@@ -656,6 +684,7 @@ impl ReaderWindow {
+             alive: self.alive.clone(),
+             scroll_accumulator: self.scroll_accumulator.clone(),
+             last_scroll_time: self.last_scroll_time.clone(),
++            reader_filter: self.reader_filter.clone(),
+         }
+     }
+ }

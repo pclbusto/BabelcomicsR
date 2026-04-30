@@ -106,7 +106,7 @@ fn build_content(
     covers: Vec<ComicbookInfoCover>,
     physical: Vec<Comicbook>,
     _card_size: CardSize,
-    _pool: SqlitePool,
+    pool: SqlitePool,
     volume_name: &str,
 ) -> gtk::Widget {
     let main_box = gtk::Box::builder()
@@ -311,12 +311,13 @@ fn build_content(
                 .build();
 
             let path_clone = cb.path.clone();
+            let pool_clone = pool.clone();
             btn_read.connect_clicked(move |_| {
                 let Some(app) = gio::Application::default() else {
                     return;
                 };
                 if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
-                    crate::ui::reader::ReaderWindow::open(adw_app, &path_clone);
+                    crate::ui::reader::ReaderWindow::open(adw_app, &path_clone, Some(pool_clone.clone()));
                 }
             });
             row.add_suffix(&btn_read);

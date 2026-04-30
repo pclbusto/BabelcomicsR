@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
                 }
 
                 tracing::info!("Abriendo comic: {}", path);
-                ReaderWindow::open(app, path);
+                ReaderWindow::open(app, path, None);
             } else {
                 eprintln!("Error: Archivo no encontrado: {}", path);
                 std::process::exit(1);
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         for file in files {
             if let Some(path) = file.path() {
                 let path_str = path.to_string_lossy().to_string();
-                ReaderWindow::open(app, &path_str);
+                ReaderWindow::open(app, &path_str, None);
             }
         }
     });

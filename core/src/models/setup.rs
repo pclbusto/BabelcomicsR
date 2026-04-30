@@ -13,6 +13,7 @@ pub struct Setup {
     pub intervalo_api: f64,
     pub api_url: Option<String>,
     pub clip_al_arranque: bool,
+    pub reader_filter: i64,
 }
 
 impl Default for Setup {
@@ -29,6 +30,7 @@ impl Default for Setup {
             intervalo_api: 0.5,
             api_url: Some("https://comicvine.gamespot.com/api/".to_string()),
             clip_al_arranque: true,
+            reader_filter: 3,
         }
     }
 }

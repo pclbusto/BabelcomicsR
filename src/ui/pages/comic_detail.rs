@@ -335,6 +335,7 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget 
 
     // Botón LEER (Lanzar lector independiente)
     let path_for_reader = comic.path.clone();
+    let pool_for_reader = pool.clone();
     let read_btn = gtk::Button::builder()
         .label("Leer")
         .icon_name("book-open-symbolic")
@@ -346,7 +347,7 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget 
             return;
         };
         if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
-            crate::ui::reader::ReaderWindow::open(adw_app, &path_for_reader);
+            crate::ui::reader::ReaderWindow::open(adw_app, &path_for_reader, Some(pool_for_reader.clone()));
         }
     });
     action_box.append(&read_btn);

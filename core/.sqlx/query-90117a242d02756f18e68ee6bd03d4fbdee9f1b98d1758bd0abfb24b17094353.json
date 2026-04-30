@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO setups\n                (setupkey, api_key_encrypted, modo_oscuro, thumbnail_size, items_por_pagina, num_workers, idioma, carpeta_thumbnails, intervalo_api, api_url, clip_al_arranque, reader_filter)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               ON CONFLICT(setupkey) DO UPDATE SET\n                api_key_encrypted  = excluded.api_key_encrypted,\n                modo_oscuro        = excluded.modo_oscuro,\n                thumbnail_size     = excluded.thumbnail_size,\n                items_por_pagina   = excluded.items_por_pagina,\n                num_workers        = excluded.num_workers,\n                idioma             = excluded.idioma,\n                carpeta_thumbnails = excluded.carpeta_thumbnails,\n                intervalo_api      = excluded.intervalo_api,\n                api_url            = excluded.api_url,\n                clip_al_arranque   = excluded.clip_al_arranque,\n                reader_filter      = excluded.reader_filter",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "90117a242d02756f18e68ee6bd03d4fbdee9f1b98d1758bd0abfb24b17094353"
+}

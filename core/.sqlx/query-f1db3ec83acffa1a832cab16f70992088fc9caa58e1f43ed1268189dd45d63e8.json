@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE setups SET reader_filter = ? WHERE setupkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f1db3ec83acffa1a832cab16f70992088fc9caa58e1f43ed1268189dd45d63e8"
+}

@@ -23,6 +23,7 @@ pub fn run(pool: SqlitePool) {
     let _ = pool_cell.set(pool);
 
     let pool_cell2 = pool_cell.clone();
+    let pool_cell_open = pool_cell.clone();
 
     // Señal OPEN: se dispara cuando el sistema pide abrir archivos (ej: doble clic en Nautilus)
     {
@@ -30,7 +31,8 @@ pub fn run(pool: SqlitePool) {
             for file in files {
                 if let Some(path) = file.path() {
                     let path_str = path.to_string_lossy().to_string();
-                    reader::ReaderWindow::open(app, &path_str);
+                    let pool = pool_cell_open.get().cloned();
+                    reader::ReaderWindow::open(app, &path_str, pool);
                 }
             }
         });
@@ -61,7 +63,8 @@ pub fn run(pool: SqlitePool) {
             // Verificar si el archivo existe antes de intentar abrirlo
             if std::path::Path::new(path).exists() {
                 tracing::info!("Abriendo comic desde argumento: {}", path);
-                reader::ReaderWindow::open(app, path);
+                let pool = pool_cell2.get().cloned();
+                reader::ReaderWindow::open(app, path, pool);
                 return;
             }
         }

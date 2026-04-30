@@ -55,6 +55,11 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         .sensitive(false)
         .build();
     header.pack_end(&apply_btn);
+
+    let skip_btn = gtk::Button::builder()
+        .label("Omitir")
+        .build();
+    header.pack_end(&skip_btn);
     toolbar.add_top_bar(&header);
 
     let paned = gtk::Paned::builder()
@@ -283,6 +288,23 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                     cache_bg.lock().unwrap().insert(next_id, res);
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    // ── Skip logic ──────────────────────────────────────────────────────────
+    {
+        let comic_views = comic_views.clone();
+        let current_idx = current_idx.clone();
+        let left_list = left_list.clone();
+
+        skip_btn.connect_clicked(move |_| {
+            let idx = current_idx.get();
+            let total = comic_views.borrow().len();
+            if idx + 1 < total {
+                if let Some(row) = left_list.row_at_index((idx + 1) as i32) {
+                    left_list.select_row(Some(&row));
+                }
             }
         });
     }
