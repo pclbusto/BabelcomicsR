@@ -276,7 +276,11 @@ impl ComicVineClient {
 
     // ── Volumes ───────────────────────────────────────────────────────────────
 
-    pub async fn get_volumes(&self, query: Option<&str>, publisher_id: Option<&str>) -> Vec<CvVolumeResult> {
+    pub async fn get_volumes(
+        &self,
+        query: Option<&str>,
+        publisher_id: Option<&str>,
+    ) -> Vec<CvVolumeResult> {
         let filter_str = build_filter(&[
             query.map(|q| format!("name:{}", sanitize_query(q))),
             publisher_id.map(|p| format!("publisher:{}", p)),

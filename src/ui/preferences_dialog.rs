@@ -8,9 +8,13 @@ use gtk4::{self as gtk, gio};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use babelcomics_core::helpers::{comicvine_client::ComicVineClient, paths, scan_service, thumbnail::{CardSize, ReaderFilter}};
-use babelcomics_core::repositories::SetupRepository;
 use crate::ui;
+use babelcomics_core::helpers::{
+    comicvine_client::ComicVineClient,
+    paths, scan_service,
+    thumbnail::{CardSize, ReaderFilter},
+};
+use babelcomics_core::repositories::SetupRepository;
 
 // ---------------------------------------------------------------------------
 // Diálogo de preferencias
@@ -80,7 +84,8 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                     } else {
                         Some(api_url)
                     };
-                    let client = ComicVineClient::new(api_key, url_opt).map_err(|e| e.to_string())?;
+                    let client =
+                        ComicVineClient::new(api_key, url_opt).map_err(|e| e.to_string())?;
                     client.validate().await.map_err(|e| e.to_string())
                 },
                 move |result| {
@@ -289,6 +294,13 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
             let btn_done = btn_scan_clone.clone();
             let label_done = label_clone.clone();
             let pool_task = pool_scan.clone();
+            let job_id = babelcomics_core::helpers::background_jobs::start_job(
+                "Escaneo de biblioteca",
+                "Preparando escaneo...",
+                babelcomics_core::helpers::background_jobs::JobKind::Scan,
+            );
+            let job_id_task = job_id.clone();
+            let job_id_done = job_id.clone();
 
             run_in_background(
                 tokio::runtime::Handle::current(),
@@ -300,6 +312,11 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                     if dir_paths.is_empty() {
                         return Err("Sin directorios configurados".to_string());
                     }
+                    babelcomics_core::helpers::background_jobs::update_job(
+                        &job_id_task,
+                        format!("Escaneando {} directorios...", dir_paths.len()),
+                        0.1,
+                    );
 
                     let card_size = CardSize::from_db(
                         SetupRepository::new(&pool_task)
@@ -312,17 +329,29 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                     scan_service::run_scan(&pool_task, &dir_paths, card_size)
                         .await
                         .map(|r| {
-                            format!(
-                                "{} encontrados · {} nuevos · {} portadas",
-                                r.total_found, r.new_inserted, r.covers_generated
-                            )
+                            let has_errors = !r.errors.is_empty();
+                            (format_scan_summary(&r), has_errors)
                         })
                         .map_err(|e| e.to_string())
                 },
                 move |result| {
                     match result {
-                        Ok(msg) => label_done.set_label(&msg),
-                        Err(e) => label_done.set_label(&e),
+                        Ok((msg, has_errors)) => {
+                            label_done.set_label(&msg);
+                            babelcomics_core::helpers::background_jobs::finish_job(
+                                &job_id_done,
+                                msg,
+                                has_errors,
+                            );
+                        }
+                        Err(e) => {
+                            label_done.set_label(&e);
+                            babelcomics_core::helpers::background_jobs::finish_job(
+                                &job_id_done,
+                                e,
+                                true,
+                            );
+                        }
                     }
                     btn_done.set_sensitive(true);
                 },
@@ -412,7 +441,12 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
         .title("Algoritmo de escalado de páginas")
         .subtitle("Calidad al generar miniaturas de páginas en el lector")
         .build();
-    let reader_filter_model = gtk::StringList::new(&["Nearest (más rápido)", "Bilineal", "CatmullRom", "Lanczos3 (mejor calidad)"]);
+    let reader_filter_model = gtk::StringList::new(&[
+        "Nearest (más rápido)",
+        "Bilineal",
+        "CatmullRom",
+        "Lanczos3 (mejor calidad)",
+    ]);
     row_reader_filter.set_model(Some(&reader_filter_model));
     group_lector.add(&row_reader_filter);
 
@@ -443,7 +477,11 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
             let pool_task = pool_rf.clone();
             run_in_background(
                 tokio::runtime::Handle::current(),
-                async move { SetupRepository::new(&pool_task).set_reader_filter(filter).await },
+                async move {
+                    SetupRepository::new(&pool_task)
+                        .set_reader_filter(filter)
+                        .await
+                },
                 |result| {
                     if let Err(e) = result {
                         tracing::error!("Error guardando filtro de lector: {e}");
@@ -775,7 +813,9 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                     let computed = tokio::task::spawn_blocking(move || {
                         let mut out = Vec::new();
                         for (id, path) in &entries {
-                            let thumb = babelcomics_core::helpers::paths::comic_thumbnail_path(*id, card_size);
+                            let thumb = babelcomics_core::helpers::paths::comic_thumbnail_path(
+                                *id, card_size,
+                            );
                             let bytes = if thumb.exists() {
                                 match std::fs::read(&thumb) {
                                     Ok(b) => b,
@@ -787,7 +827,9 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
                                     Err(_) => continue,
                                 }
                             };
-                            if let Some(hash) = babelcomics_core::helpers::cover_hash::compute_hash(&bytes) {
+                            if let Some(hash) =
+                                babelcomics_core::helpers::cover_hash::compute_hash(&bytes)
+                            {
                                 out.push((*id, hash));
                             }
                         }
@@ -872,6 +914,18 @@ pub fn build_preferences_dialog(pool: SqlitePool) -> adw::PreferencesDialog {
     dialog.add(&page_avanzado);
 
     dialog
+}
+
+fn format_scan_summary(result: &scan_service::ScanResult) -> String {
+    let mut parts = vec![
+        format!("{} cómics encontrados", result.total_found),
+        format!("{} nuevos", result.new_inserted),
+        format!("{} miniaturas generadas", result.covers_generated),
+    ];
+    if !result.errors.is_empty() {
+        parts.push(format!("{} errores", result.errors.len()));
+    }
+    parts.join(" · ")
 }
 
 // ---------------------------------------------------------------------------

@@ -7,11 +7,11 @@ use gtk4::{self as gtk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::run_in_background;
 use babelcomics_core::helpers::suggestion_service::UnifiedSuggestion;
 use babelcomics_core::helpers::thumbnail::CardSize;
 use babelcomics_core::models::ComicbookView;
 use babelcomics_core::repositories::ComicbookRepository;
-use crate::ui::run_in_background;
 
 const COVER_HEIGHT: i32 = 400;
 const THUMB_SMALL_H: i32 = 80;
@@ -43,22 +43,37 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         .show_start_title_buttons(false)
         .show_end_title_buttons(false)
         .build();
+    let title_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .build();
     let title_lbl = gtk::Label::builder()
-        .label("Catalogación Inteligente")
+        .label("Catalogación inteligente")
         .css_classes(["heading"])
         .build();
-    header.set_title_widget(Some(&title_lbl));
+    let position_lbl = gtk::Label::builder()
+        .label("0/0")
+        .css_classes(["caption", "dim-label"])
+        .build();
+    title_box.append(&title_lbl);
+    title_box.append(&position_lbl);
+    header.set_title_widget(Some(&title_box));
 
     let apply_btn = gtk::Button::builder()
-        .label("Aplicar")
+        .label("Vincular")
         .css_classes(["suggested-action"])
         .sensitive(false)
         .build();
     header.pack_end(&apply_btn);
 
-    let skip_btn = gtk::Button::builder()
-        .label("Omitir")
+    let clear_btn = gtk::Button::builder()
+        .label("Limpiar vínculo")
+        .css_classes(["destructive-action"])
+        .tooltip_text("Quita la catalogación del cómic actual")
         .build();
+    header.pack_end(&clear_btn);
+
+    let skip_btn = gtk::Button::builder().label("Omitir").build();
     header.pack_end(&skip_btn);
     toolbar.add_top_bar(&header);
 
@@ -156,6 +171,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         let right_info = right_info.clone();
         let candidates_box = candidates_box.clone();
         let apply_btn = apply_btn.clone();
+        let position_lbl = position_lbl.clone();
         let pool = pool.clone();
         let cache = suggestions_cache.clone();
         let p_cache = pixbuf_cache.clone();
@@ -167,6 +183,8 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
             selected_match_idx.set(0);
             matches.borrow_mut().clear();
             apply_btn.set_sensitive(false);
+            let total = comic_views.borrow().len();
+            position_lbl.set_label(&format!("{}/{}", idx + 1, total));
 
             let comic_id = {
                 let views = comic_views.borrow();
@@ -211,7 +229,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                     .valign(gtk::Align::Center)
                     .build(),
             );
-            right_info.set_label("Buscando matches…");
+            right_info.set_label("Buscando coincidencias…");
             clear_box(&candidates_box);
 
             let p = pool.clone();
@@ -228,7 +246,10 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
             run_in_background(
                 tokio::runtime::Handle::current(),
                 async move {
-                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(&p, comic_id, 10).await
+                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(
+                        &p, comic_id, 10,
+                    )
+                    .await
                 },
                 move |result| {
                     if s_gen.get() != generation {
@@ -264,6 +285,54 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         });
     }
 
+    // ── Clear cataloguing logic ──────────────────────────────────────────────
+    {
+        let comic_views = comic_views.clone();
+        let current_idx = current_idx.clone();
+        let left_list = left_list.clone();
+        let pool = pool.clone();
+
+        clear_btn.connect_clicked(move |btn| {
+            let idx = current_idx.get();
+            let comic_id = comic_views.borrow().get(idx).map(|c| c.id_comicbook);
+            let Some(cid) = comic_id else { return };
+
+            btn.set_sensitive(false);
+            let p = pool.clone();
+            let btn_done = btn.clone();
+            let views_done = comic_views.clone();
+            let ll_done = left_list.clone();
+
+            run_in_background(
+                tokio::runtime::Handle::current(),
+                async move {
+                    babelcomics_core::repositories::ComicbookRepository::new(&p)
+                        .set_info(cid, None)
+                        .await
+                },
+                move |_| {
+                    if let Some(view) = views_done.borrow_mut().get_mut(idx) {
+                        view.titulo = None;
+                        view.numero = None;
+                        view.calificacion = None;
+                        view.nombre_volume = None;
+                        view.nombre_publisher = None;
+                        view.ruta_cover = None;
+                        view.catalog_match_similarity = None;
+                        view.catalog_best_similarity = None;
+                        view.catalog_selected_rank = None;
+                        view.catalog_match_method = None;
+
+                        if let Some(row) = ll_done.row_at_index(idx as i32) {
+                            set_list_row_title(&row, &display_title_for_view(view));
+                        }
+                    }
+                    btn_done.set_sensitive(true);
+                },
+            );
+        });
+    }
+
     // ── Background Prefetcher ────────────────────────────────────────────────
     {
         let pool_bg = pool.clone();
@@ -282,8 +351,10 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                     continue;
                 }
                 if let Ok(res) =
-                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(&pool_bg, next_id, 10)
-                        .await
+                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(
+                        &pool_bg, next_id, 10,
+                    )
+                    .await
                 {
                     cache_bg.lock().unwrap().insert(next_id, res);
                 }
@@ -325,8 +396,37 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                 .borrow()
                 .get(selected_match_idx.get())
                 .map(|m| m.id_comicbook_info);
+            let match_metrics = {
+                let matches_ref = matches.borrow();
+                let selected_idx = selected_match_idx.get();
+                matches_ref.get(selected_idx).map(|selected| {
+                    let best_similarity = matches_ref
+                        .first()
+                        .map(|m| m.similarity)
+                        .unwrap_or(selected.similarity);
+                    let method = match selected.method {
+                        babelcomics_core::helpers::suggestion_service::SuggestionMethod::Clip => {
+                            "clip"
+                        }
+                        babelcomics_core::helpers::suggestion_service::SuggestionMethod::Hash => {
+                            "hash"
+                        }
+                    };
+                    (
+                        selected.similarity as f64,
+                        best_similarity as f64,
+                        selected_idx as i64 + 1,
+                        method.to_string(),
+                    )
+                })
+            };
 
-            if let (Some(cid), Some(iid)) = (comic_id, info_id) {
+            if let (
+                Some(cid),
+                Some(iid),
+                Some((selected_similarity, best_similarity, rank, method)),
+            ) = (comic_id, info_id, match_metrics)
+            {
                 btn.set_sensitive(false);
                 let p = pool.clone();
                 let ll = left_list.clone();
@@ -335,7 +435,14 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                     tokio::runtime::Handle::current(),
                     async move {
                         babelcomics_core::repositories::ComicbookRepository::new(&p)
-                            .set_info(cid, Some(iid))
+                            .set_info_with_match_metrics(
+                                cid,
+                                iid,
+                                selected_similarity,
+                                best_similarity,
+                                rank,
+                                &method,
+                            )
                             .await
                     },
                     move |_| {
@@ -400,7 +507,8 @@ fn append_placeholder(b: &gtk::Box, px: i32) {
 }
 
 fn load_comic_cover_async(comic_id: i64, target: gtk::Box) {
-    let thumb_path = babelcomics_core::helpers::paths::comic_thumbnail_path(comic_id, CardSize::Large);
+    let thumb_path =
+        babelcomics_core::helpers::paths::comic_thumbnail_path(comic_id, CardSize::Large);
     run_in_background(
         tokio::runtime::Handle::current(),
         async move { tokio::fs::read(&thumb_path).await.ok() },
@@ -438,7 +546,8 @@ fn build_list_row(view: &ComicbookView) -> gtk::ListBoxRow {
     let id = view.id_comicbook;
     let tc_weak = thumb_container.downgrade();
     glib::idle_add_local_once(move || {
-        let thumb_path = babelcomics_core::helpers::paths::comic_thumbnail_path(id, CardSize::Small);
+        let thumb_path =
+            babelcomics_core::helpers::paths::comic_thumbnail_path(id, CardSize::Small);
         run_in_background(
             tokio::runtime::Handle::current(),
             async move { tokio::fs::read(&thumb_path).await.ok() },
@@ -456,14 +565,7 @@ fn build_list_row(view: &ComicbookView) -> gtk::ListBoxRow {
         );
     });
 
-    let label_text = if let Some(t) = &view.titulo {
-        t.clone()
-    } else {
-        std::path::Path::new(&view.path)
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| view.path.clone())
-    };
+    let label_text = display_title_for_view(view);
     row_box.append(&thumb_container);
     row_box.append(
         &gtk::Label::builder()
@@ -475,6 +577,31 @@ fn build_list_row(view: &ComicbookView) -> gtk::ListBoxRow {
             .build(),
     );
     gtk::ListBoxRow::builder().child(&row_box).build()
+}
+
+fn display_title_for_view(view: &ComicbookView) -> String {
+    if let Some(t) = &view.titulo {
+        t.clone()
+    } else {
+        std::path::Path::new(&view.path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| view.path.clone())
+    }
+}
+
+fn set_list_row_title(row: &gtk::ListBoxRow, title: &str) {
+    let Some(row_box) = row.child().and_then(|w| w.downcast::<gtk::Box>().ok()) else {
+        return;
+    };
+    let mut child = row_box.first_child();
+    while let Some(widget) = child {
+        if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+            label.set_label(title);
+            return;
+        }
+        child = widget.next_sibling();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,7 +619,7 @@ fn populate_right_column(
     if new_matches.is_empty() {
         clear_box(right_cover);
         append_placeholder(right_cover, 64);
-        right_info.set_label("Sin matches encontrados");
+        right_info.set_label("Sin coincidencias encontradas");
         apply_btn.set_sensitive(false);
         return;
     }
@@ -660,7 +787,10 @@ fn build_candidate_thumb(
                 )
                 .await?;
                 tokio::task::spawn_blocking(move || {
-                    babelcomics_core::helpers::thumbnail::resize_to_height_rgb(&bytes, target_h as u32)
+                    babelcomics_core::helpers::thumbnail::resize_to_height_rgb(
+                        &bytes,
+                        target_h as u32,
+                    )
                 })
                 .await
                 .ok()?

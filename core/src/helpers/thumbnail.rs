@@ -25,22 +25,26 @@ impl ReaderFilter {
 
     pub fn to_db(self) -> i64 {
         match self {
-            Self::Nearest    => 0,
-            Self::Triangle   => 1,
+            Self::Nearest => 0,
+            Self::Triangle => 1,
             Self::CatmullRom => 2,
-            Self::Lanczos3   => 3,
+            Self::Lanczos3 => 3,
         }
     }
 
-    pub fn combo_index(self) -> u32 { self.to_db() as u32 }
-    pub fn from_combo_index(idx: u32) -> Self { Self::from_db(idx as i64) }
+    pub fn combo_index(self) -> u32 {
+        self.to_db() as u32
+    }
+    pub fn from_combo_index(idx: u32) -> Self {
+        Self::from_db(idx as i64)
+    }
 
     fn to_filter_type(self) -> FilterType {
         match self {
-            Self::Nearest    => FilterType::Nearest,
-            Self::Triangle   => FilterType::Triangle,
+            Self::Nearest => FilterType::Nearest,
+            Self::Triangle => FilterType::Triangle,
             Self::CatmullRom => FilterType::CatmullRom,
-            Self::Lanczos3   => FilterType::Lanczos3,
+            Self::Lanczos3 => FilterType::Lanczos3,
         }
     }
 }
@@ -244,8 +248,8 @@ pub async fn load_page_thumb(
                 image::open(&cached).context("No se pudo abrir la página extraída")?
             } else {
                 let bytes = extract_page_to_memory(&comic_path, &page_name)?;
-                let img = image::load_from_memory(&bytes)
-                    .context("No se pudo decodificar la página")?;
+                let img =
+                    image::load_from_memory(&bytes).context("No se pudo decodificar la página")?;
                 drop(bytes);
                 img
             };

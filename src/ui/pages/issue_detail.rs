@@ -4,12 +4,12 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::run_in_background;
 use babelcomics_core::helpers::thumbnail::CardSize;
 use babelcomics_core::models::{Comicbook, ComicbookInfo, ComicbookInfoCover};
 use babelcomics_core::repositories::{
     ComicbookInfoRepository, ComicbookRepository, SetupRepository, VolumeRepository,
 };
-use crate::ui::run_in_background;
 
 /// Actualiza el título de la pestaña con el número y título del issue.
 pub fn setup_tab_title(issue_info_id: i64, pool: SqlitePool, page: glib::WeakRef<adw::TabPage>) {
@@ -317,7 +317,11 @@ fn build_content(
                     return;
                 };
                 if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
-                    crate::ui::reader::ReaderWindow::open(adw_app, &path_clone, Some(pool_clone.clone()));
+                    crate::ui::reader::ReaderWindow::open(
+                        adw_app,
+                        &path_clone,
+                        Some(pool_clone.clone()),
+                    );
                 }
             });
             row.add_suffix(&btn_read);

@@ -2,6 +2,9 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, ScrolledWindow, SearchEntry};
 use libadwaita as adw;
 
+const EDITORIAL_ICON_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/editorial.svg");
+
 pub fn build() -> gtk::Widget {
     let toolbar = adw::ToolbarView::new();
 
@@ -31,11 +34,33 @@ pub fn build() -> gtk::Widget {
         .margin_end(12)
         .build();
 
-    let placeholder = adw::StatusPage::builder()
-        .title("Sin editoriales")
-        .description("Las editoriales aparecerán al descargar metadatos de ComicVine")
-        .icon_name("building-symbolic")
+    let placeholder = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .spacing(12)
         .build();
+    placeholder.append(
+        &gtk::Image::builder()
+            .file(EDITORIAL_ICON_PATH)
+            .pixel_size(96)
+            .opacity(0.65)
+            .build(),
+    );
+    placeholder.append(
+        &gtk::Label::builder()
+            .label("Sin editoriales")
+            .css_classes(["title-1"])
+            .build(),
+    );
+    placeholder.append(
+        &gtk::Label::builder()
+            .label("Las editoriales aparecerán al descargar metadatos de ComicVine")
+            .css_classes(["dim-label"])
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .build(),
+    );
 
     let stack = gtk::Stack::new();
     stack.add_named(&placeholder, Some("empty"));

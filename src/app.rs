@@ -7,9 +7,9 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::{self, reader, window};
 use babelcomics_core::helpers::{scan_service, thumbnail::CardSize};
 use babelcomics_core::repositories::SetupRepository;
-use crate::ui::{self, reader, window};
 
 const APP_ID: &str = "com.github.babelcomics";
 

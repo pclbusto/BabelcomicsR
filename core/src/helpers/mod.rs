@@ -1,3 +1,4 @@
+pub mod background_jobs;
 pub mod clip_embedder;
 pub mod comicvine_client;
 pub mod cover_hash;

@@ -1,5 +1,5 @@
 .comic-card {
-    border-radius: 12px;
+    border-radius: 8px;
     padding: 8px;
     transition: all 200ms ease;
     background-color: transparent;
@@ -10,12 +10,12 @@
 }
 
 .comic-cover-container {
-    border-radius: 16px;
+    border-radius: 8px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .comic-cover-frame {
-    border-radius: 16px;
+    border-radius: 8px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
@@ -64,11 +64,11 @@
 .cover-image {
     /* Shadow and padding handled in container or here if needed */
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    border-radius: 12px;
+    border-radius: 8px;
 }
 
 .card {
-    border-radius: 12px;
+    border-radius: 8px;
     background-color: transparent;
     transition: all 200ms ease;
     border: 2px solid transparent;

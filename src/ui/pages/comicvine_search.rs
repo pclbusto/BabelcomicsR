@@ -7,11 +7,13 @@ use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use babelcomics_core::helpers::comicvine_client::{ComicVineClient, CvPublisherResult, CvVolumeResult};
+use crate::ui::run_in_background;
+use babelcomics_core::helpers::comicvine_client::{
+    ComicVineClient, CvPublisherResult, CvVolumeResult,
+};
 use babelcomics_core::helpers::download_manager::{DownloadManager, fetch_image_bytes};
 use babelcomics_core::helpers::publisher_import_service;
 use babelcomics_core::repositories::SetupRepository;
-use crate::ui::run_in_background;
 
 // ── Tipos internos ────────────────────────────────────────────────────────────
 
@@ -167,7 +169,8 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
     main_box.append(&scrolled);
 
     // ── Estado compartido ─────────────────────────────────────────────────────
-    let selected_volumes: Arc<Mutex<HashMap<String, CvVolumeResult>>> = Arc::new(Mutex::new(HashMap::new()));
+    let selected_volumes: Arc<Mutex<HashMap<String, CvVolumeResult>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let selected_publishers: Arc<Mutex<HashMap<String, i64>>> =
         Arc::new(Mutex::new(HashMap::new()));
 

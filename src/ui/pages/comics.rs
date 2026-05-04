@@ -10,11 +10,11 @@ use gtk4::{self as gtk, ScrolledWindow, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::run_in_background;
 use babelcomics_core::helpers::paths::comic_thumbnail_path;
 use babelcomics_core::helpers::thumbnail::CardSize;
 use babelcomics_core::models::{ComicFilter, ComicbookView};
 use babelcomics_core::repositories::{ComicbookRepository, SetupRepository};
-use crate::ui::run_in_background;
 
 /// Widgets pendientes de recibir su thumbnail.
 /// Mapa de id_comicbook → (numero, weak_ref al contenedor de imagen).
@@ -35,7 +35,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 
     // Barra de búsqueda
     let search_entry = gtk::SearchEntry::builder()
-        .placeholder_text("Buscar comics…")
+        .placeholder_text("Buscar cómics…")
         .hexpand(true)
         .build();
 
@@ -133,7 +133,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 
     // Placeholder cuando no hay comics
     let placeholder = adw::StatusPage::builder()
-        .title("Sin comics")
+        .title("Sin cómics")
         .description("Añade un directorio en Preferencias y ejecuta el escaneo")
         .icon_name("folder-symbolic")
         .build();
@@ -203,7 +203,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         .build();
     clip_btn_label_box.append(
         &gtk::Label::builder()
-            .label("Buscar series similares por portada")
+            .label("Buscar coincidencias por portada")
             .halign(gtk::Align::Start)
             .build(),
     );
@@ -263,9 +263,9 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
             let selected = wb_weak.upgrade().map_or(0, |wb| contar_seleccionados(&wb));
 
             let mut parts = vec![if total == 1 {
-                "1 comic".to_string()
+                "1 cómic".to_string()
             } else {
-                format!("{} comics", total)
+                format!("{} cómics", total)
             }];
             if loaded < total {
                 parts.push(format!("{} cargados", loaded));
@@ -448,7 +448,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
             if load_s.get() || done_s.get() {
                 return;
             }
-            if adj.value() + adj.page_size() >= adj.upper() - 800.0 {
+            if adj.value() + adj.page_size() >= adj.upper() - 2500.0 {
                 let filter = fs_s.borrow().clone();
                 let current_gen = gen_s.get();
                 cargar_pagina(
@@ -513,9 +513,7 @@ fn start_thumbnail_consumer(
     weak_box: glib::WeakRef<adw::WrapBox>,
 ) {
     let rx = Rc::new(RefCell::new(rx));
-    // libjpeg-turbo decodifica un JPEG de 400px en <0.5ms;
-    // 32 por tick a 16ms = headroom de ~15ms para el resto del event loop.
-    const MAX_PER_TICK: usize = 32;
+    const MAX_PER_TICK: usize = 8;
 
     glib::timeout_add_local(Duration::from_millis(16), move || {
         if weak_box.upgrade().is_none() {
@@ -573,8 +571,10 @@ fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size
         if !thumb_path.exists() {
             let path_clone = path.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone) {
-                    let _ = babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
+                if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone)
+                {
+                    let _ =
+                        babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
                 }
             })
             .await;
@@ -705,12 +705,12 @@ fn cargar_pagina(
                 stack_done.set_visible_child_name("grid");
             }
 
-            // Agregar cards en lotes idle para no bloquear el hilo GTK
+            // Agregar cards en lotes con timeout para que GTK pueda pintar entre tandas
             let comics = Rc::new(comics);
             let idx = Rc::new(RefCell::new(0usize));
             const BATCH: usize = 25;
 
-            glib::idle_add_local(move || {
+            glib::timeout_add_local(Duration::from_millis(8), move || {
                 // Volver a comprobar en cada lote por si el usuario cambió de búsqueda mientras
                 if gen_check.get() != current_gen {
                     return glib::ControlFlow::Break;

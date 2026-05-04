@@ -10,11 +10,11 @@ use gtk4::{self as gtk, ScrolledWindow, gdk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::run_in_background;
 use babelcomics_core::helpers::paths::comic_thumbnail_path;
 use babelcomics_core::helpers::thumbnail::CardSize;
 use babelcomics_core::models::VolumeView;
 use babelcomics_core::repositories::{SetupRepository, VolumeRepository, VolumeSortOrder};
-use crate::ui::run_in_background;
 
 type PublisherFilter = Rc<RefCell<Vec<i64>>>;
 
@@ -57,8 +57,8 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     let r_nombre_desc = gtk::CheckButton::with_label("Nombre Z–A");
     let r_anio_asc = gtk::CheckButton::with_label("Año ↑");
     let r_anio_desc = gtk::CheckButton::with_label("Año ↓");
-    let r_issues_asc = gtk::CheckButton::with_label("Nº issues ↑");
-    let r_issues_desc = gtk::CheckButton::with_label("Nº issues ↓");
+    let r_issues_asc = gtk::CheckButton::with_label("Nº números ↑");
+    let r_issues_desc = gtk::CheckButton::with_label("Nº números ↓");
 
     r_nombre_asc.set_active(true);
     r_nombre_desc.set_group(Some(&r_nombre_asc));
@@ -144,6 +144,11 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         }
     });
 
+    // ── Atajos de teclado locales (F5 para refrescar) ───────────────────────
+    let controller = gtk::ShortcutController::new();
+    controller.set_scope(gtk::ShortcutScope::Managed);
+    toolbar.add_controller(controller.clone());
+
     // Grid de volúmenes
     let scrolled = ScrolledWindow::builder()
         .vexpand(true)
@@ -176,7 +181,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     // Opción: Actualizar desde ComicVine
     let update_btn = build_popover_button(
         "Sincronizar con ComicVine",
-        "Descarga issues y metadatos",
+        "Descarga números y metadatos",
         "view-refresh-symbolic",
     );
     // Opción: Generar Embeddings CLIP
@@ -413,6 +418,18 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
             );
         }
     };
+
+    {
+        let reset = make_reset.clone();
+        let action = gtk::CallbackAction::new(move |_, _| {
+            reset();
+            glib::Propagation::Stop
+        });
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(gtk::ShortcutTrigger::parse_string("F5").unwrap()),
+            Some(action),
+        ));
+    }
 
     // --- Eventos de búsqueda ---
     {
@@ -722,7 +739,8 @@ fn cargar_pagina(
                         tw_done.borrow_mut().insert(id_portada, img_weak);
                         schedule_thumbnail(id_portada, path.clone(), tx_done.clone(), card_size);
                     } else {
-                        let vt_path = babelcomics_core::helpers::paths::volume_thumbnail_path(vol.id_volume);
+                        let vt_path =
+                            babelcomics_core::helpers::paths::volume_thumbnail_path(vol.id_volume);
                         if vt_path.exists() {
                             let id_neg = -vol.id_volume;
                             tw_done.borrow_mut().insert(id_neg, img_weak);
@@ -739,7 +757,12 @@ fn cargar_pagina(
                             let tx = tx_done.clone();
                             let url = vol.image_url.clone();
                             tokio::runtime::Handle::current().spawn(async move {
-                                if let Some(bytes) = babelcomics_core::helpers::download_manager::fetch_image_bytes(&url).await {
+                                if let Some(bytes) =
+                                    babelcomics_core::helpers::download_manager::fetch_image_bytes(
+                                        &url,
+                                    )
+                                    .await
+                                {
                                     if let Some(parent) = vt_path.parent() {
                                         let _ = std::fs::create_dir_all(parent);
                                     }
@@ -1048,8 +1071,10 @@ fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size
         if !thumb_path.exists() {
             let path_clone = path.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone) {
-                    let _ = babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
+                if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone)
+                {
+                    let _ =
+                        babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, id);
                 }
             })
             .await;

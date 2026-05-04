@@ -23,7 +23,7 @@ Un cómic puede tener diferentes proporciones (retrato estándar, formatos europ
 
 ### Ejemplo de Implementación (Rust)
 
-```rust
+```rust,ignore
 // Ejemplo simplificado de creación de tarjeta
 let card = gtk::Box::builder()
     .orientation(gtk::Orientation::Vertical)

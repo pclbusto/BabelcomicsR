@@ -10,12 +10,14 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::run_in_background;
 use babelcomics_core::helpers::paths::comic_thumbnail_path;
 use babelcomics_core::helpers::suggestion_service::UnifiedSuggestion;
 use babelcomics_core::helpers::thumbnail::CardSize;
 use babelcomics_core::models::{ComicbookView, NewComicbookDetail};
-use babelcomics_core::repositories::{ComicbookDetailRepository, ComicbookRepository, SetupRepository};
-use crate::ui::run_in_background;
+use babelcomics_core::repositories::{
+    ComicbookDetailRepository, ComicbookRepository, SetupRepository,
+};
 
 /// Una vez creada la `adw::TabPage`, actualiza su título con el nombre real del cómic.
 pub fn setup_tab_title(comic_id: i64, pool: SqlitePool, page: glib::WeakRef<adw::TabPage>) {
@@ -199,7 +201,9 @@ fn build_cover(comic: &ComicbookView, card_size: CardSize) -> gtk::Widget {
             if !thumb_path.exists() {
                 let path_clone = path.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(bytes) = babelcomics_core::helpers::extractor::extract_cover(&path_clone) {
+                    if let Ok(bytes) =
+                        babelcomics_core::helpers::extractor::extract_cover(&path_clone)
+                    {
                         let _ = babelcomics_core::helpers::thumbnail::generate_all_thumbnails(
                             &bytes,
                             id_comicbook,
@@ -347,7 +351,11 @@ fn build_action_buttons(comic: &ComicbookView, pool: SqlitePool) -> gtk::Widget 
             return;
         };
         if let Some(adw_app) = app.downcast_ref::<adw::Application>() {
-            crate::ui::reader::ReaderWindow::open(adw_app, &path_for_reader, Some(pool_for_reader.clone()));
+            crate::ui::reader::ReaderWindow::open(
+                adw_app,
+                &path_for_reader,
+                Some(pool_for_reader.clone()),
+            );
         }
     });
     action_box.append(&read_btn);
@@ -495,7 +503,10 @@ fn show_suggest_dialog(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
-            babelcomics_core::helpers::suggestion_service::suggest_best_matches(&pool_done, comic_id, 10).await
+            babelcomics_core::helpers::suggestion_service::suggest_best_matches(
+                &pool_done, comic_id, 10,
+            )
+            .await
         },
         move |result| match result {
             Err(_) => {
@@ -872,9 +883,11 @@ fn drain_page_thumb_queue(
         tokio::runtime::Handle::current(),
         async move {
             tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, i32, i32, i32)> {
-                let bytes =
-                    babelcomics_core::helpers::extractor::extract_page_to_memory(&comic_path, &page_name)
-                        .ok()?;
+                let bytes = babelcomics_core::helpers::extractor::extract_page_to_memory(
+                    &comic_path,
+                    &page_name,
+                )
+                .ok()?;
                 babelcomics_core::helpers::thumbnail::resize_to_height_rgb(&bytes, ch)
             })
             .await
@@ -996,12 +1009,19 @@ fn build_page_card(
                 .flatten();
             if let Some(comic) = comic_opt {
                 let clip_blob = tokio::task::spawn_blocking(move || {
-                    let bytes =
-                        babelcomics_core::helpers::extractor::extract_page_to_memory(&comic.path, &name_c)?;
-                    babelcomics_core::helpers::thumbnail::generate_all_thumbnails(&bytes, comicbook_id)?;
+                    let bytes = babelcomics_core::helpers::extractor::extract_page_to_memory(
+                        &comic.path,
+                        &name_c,
+                    )?;
+                    babelcomics_core::helpers::thumbnail::generate_all_thumbnails(
+                        &bytes,
+                        comicbook_id,
+                    )?;
                     // Recalcular CLIP embedding con la nueva portada
                     let emb = babelcomics_core::helpers::clip_embedder::embed_image(&bytes)?;
-                    Ok::<Vec<u8>, anyhow::Error>(babelcomics_core::helpers::clip_embedder::to_bytes(&emb))
+                    Ok::<Vec<u8>, anyhow::Error>(
+                        babelcomics_core::helpers::clip_embedder::to_bytes(&emb),
+                    )
                 })
                 .await
                 .ok()

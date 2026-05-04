@@ -1,7 +1,6 @@
 [book]
 authors = ["Pedro"]
 language = "es"
-multilingual = false
 src = "src_doc"
 title = "BabelcomicsR - Manual y Documentación Técnica"
 
@@ -9,4 +8,4 @@ title = "BabelcomicsR - Manual y Documentación Técnica"
 
 [output.html]
 git-repository-url = "https://github.com/tu-usuario/BabelcomicsR"
-edit-url-template = "https://github.com/tu-usuario/BabelcomicsR/edit/main/docs/{path}"
+edit-url-template = "https://github.com/tu-usuario/BabelcomicsR/edit/main/src_doc/{path}"

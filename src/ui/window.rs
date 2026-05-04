@@ -7,6 +7,9 @@ use std::sync::mpsc::Sender;
 
 use super::pages;
 
+const EDITORIAL_ICON_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/editorial.svg");
+
 #[derive(Clone, Debug)]
 pub(crate) struct ClipProgressStats {
     pub total: i64,
@@ -158,23 +161,101 @@ fn setup_download_covers_action(
         let pool_task = pool.clone();
         let overlay_done = overlay_weak.clone();
         let action_done = action_ref.clone();
+        let job_id = babelcomics_core::helpers::background_jobs::start_job(
+            "Embeddings CLIP",
+            "Buscando portadas existentes en disco...",
+            babelcomics_core::helpers::background_jobs::JobKind::Clip,
+        );
+        let job_id_for_task = job_id.clone();
+        let job_id_for_done = job_id.clone();
 
         crate::ui::run_in_background(
             tokio::runtime::Handle::current(),
             async move {
                 // 1. Enlazar en BD las portadas que ya están en disco
                 let link_result =
-                    babelcomics_core::helpers::scan_service::relink_covers_from_disk(&pool_task).await;
+                    babelcomics_core::helpers::scan_service::relink_covers_from_disk(&pool_task)
+                        .await;
+                babelcomics_core::helpers::background_jobs::update_job(
+                    &job_id_for_task,
+                    "Generando embeddings CLIP...",
+                    0.0,
+                );
+                let job_id_for_progress = job_id_for_task.clone();
+                let (progress_tx, progress_rx) = std::sync::mpsc::channel::<
+                    babelcomics_core::helpers::scan_service::ClipGenerationProgress,
+                >();
+                std::thread::spawn(move || {
+                    while let Ok(progress) = progress_rx.recv() {
+                        let remaining = progress.total.saturating_sub(progress.processed);
+                        let fraction = if progress.total > 0 {
+                            progress.processed as f64 / progress.total as f64
+                        } else {
+                            1.0
+                        };
+                        babelcomics_core::helpers::background_jobs::update_job(
+                            &job_id_for_progress,
+                            format!(
+                                "{}/{} procesadas, {} restantes, {} generadas, {} errores",
+                                progress.processed,
+                                progress.total,
+                                remaining,
+                                progress.generated,
+                                progress.errors
+                            ),
+                            fraction,
+                        );
+                    }
+                });
                 // 2. Generar embeddings CLIP para todas las que tienen ruta_local
                 let clip_result =
-                    babelcomics_core::helpers::scan_service::generate_missing_clip_embeddings(&pool_task)
-                        .await;
+                    babelcomics_core::helpers::scan_service::generate_clip_embeddings(
+                        &pool_task,
+                        None,
+                        true,
+                        Some(progress_tx),
+                    )
+                    .await;
                 (link_result, clip_result)
             },
             move |(link_result, clip_result)| {
                 if let Some(a) = action_done.upgrade() {
                     a.set_enabled(true);
                 }
+
+                let job_msg = match (&link_result, &clip_result) {
+                    (Ok((0, _)), Ok((0, _))) => {
+                        "No se encontraron portadas nuevas en disco".to_string()
+                    }
+                    (Ok((lk, _)), Ok((cl, errs))) => {
+                        let mut parts = Vec::new();
+                        if *lk > 0 {
+                            parts.push(format!("{} portadas enlazadas desde disco", lk));
+                        }
+                        if *cl > 0 {
+                            parts.push(format!("{} embeddings CLIP generados", cl));
+                        }
+                        if !errs.is_empty() {
+                            parts.push(format!("{} errores", errs.len()));
+                        }
+                        if parts.is_empty() {
+                            "Todo ya estaba indexado".to_string()
+                        } else {
+                            parts.join(", ")
+                        }
+                    }
+                    (Err(e), _) => format!("Error escaneando disco: {e}"),
+                    (_, Err(e)) => format!("Error generando CLIP: {e}"),
+                };
+                let has_error = link_result.is_err()
+                    || clip_result
+                        .as_ref()
+                        .map_or(true, |(_, errs)| !errs.is_empty());
+                babelcomics_core::helpers::background_jobs::finish_job(
+                    &job_id_for_done,
+                    job_msg,
+                    has_error,
+                );
 
                 if let Some(overlay) = overlay_done.upgrade() {
                     let msg = match (link_result, clip_result) {
@@ -270,6 +351,17 @@ pub(crate) fn run_clip_generation(
     overlay_weak: Option<glib::WeakRef<adw::ToastOverlay>>,
     event_tx: Option<Sender<ClipGenerationEvent>>,
 ) {
+    let job_title = if let Some(id) = volume_id {
+        format!("Embeddings CLIP - volumen {id}")
+    } else {
+        "Embeddings CLIP".to_string()
+    };
+    let job_id = babelcomics_core::helpers::background_jobs::start_job(
+        &job_title,
+        "Preparando indexación...",
+        babelcomics_core::helpers::background_jobs::JobKind::Clip,
+    );
+
     if let Some(ref ow) = overlay_weak {
         if let Some(overlay) = ow.upgrade() {
             let msg = if solo_faltantes {
@@ -283,6 +375,8 @@ pub(crate) fn run_clip_generation(
 
     let event_tx_for_task = event_tx.clone();
     let event_tx_for_done = event_tx.clone();
+    let job_id_for_task = job_id.clone();
+    let job_id_for_done = job_id.clone();
 
     crate::ui::run_in_background(
         tokio::runtime::Handle::current(),
@@ -299,23 +393,41 @@ pub(crate) fn run_clip_generation(
                 stats.2,
                 stats.3
             );
-            let progress_tx = event_tx_for_task.as_ref().map(|tx| {
-                let ui_tx = tx.clone();
-                let (progress_tx, progress_rx) = std::sync::mpsc::channel::<
-                    babelcomics_core::helpers::scan_service::ClipGenerationProgress,
-                >();
-                std::thread::spawn(move || {
-                    while let Ok(progress) = progress_rx.recv() {
-                        let _ = ui_tx.send(ClipGenerationEvent::Progress(progress));
+            let ui_event_tx = event_tx_for_task.clone();
+            let job_id = job_id_for_task.clone();
+            let (progress_tx, progress_rx) = std::sync::mpsc::channel::<
+                babelcomics_core::helpers::scan_service::ClipGenerationProgress,
+            >();
+            std::thread::spawn(move || {
+                while let Ok(progress) = progress_rx.recv() {
+                    let remaining = progress.total.saturating_sub(progress.processed);
+                    let fraction = if progress.total > 0 {
+                        progress.processed as f64 / progress.total as f64
+                    } else {
+                        1.0
+                    };
+                    babelcomics_core::helpers::background_jobs::update_job(
+                        &job_id,
+                        format!(
+                            "{}/{} procesadas, {} restantes, {} generadas, {} errores",
+                            progress.processed,
+                            progress.total,
+                            remaining,
+                            progress.generated,
+                            progress.errors
+                        ),
+                        fraction,
+                    );
+                    if let Some(tx) = &ui_event_tx {
+                        let _ = tx.send(ClipGenerationEvent::Progress(progress));
                     }
-                });
-                progress_tx
+                }
             });
             let result = babelcomics_core::helpers::scan_service::generate_clip_embeddings(
                 &pool,
                 volume_id,
                 solo_faltantes,
-                progress_tx,
+                Some(progress_tx),
             )
             .await;
             (result, stats)
@@ -337,6 +449,27 @@ pub(crate) fn run_clip_generation(
                 });
             }
 
+            let status_message = match &result {
+                Ok((0, _)) if stats.con_archivo == 0 => {
+                    format!("Sin portadas descargadas ({} números en BD).", stats.total)
+                }
+                Ok((0, _)) => format!(
+                    "{} portadas ya indexadas de {} con archivo local",
+                    stats.indexadas, stats.con_archivo
+                ),
+                Ok((n, errs)) if errs.is_empty() => format!(
+                    "Completado: {n} portadas indexadas, {} pendientes",
+                    stats.pendientes.saturating_sub(*n as i64)
+                ),
+                Ok((n, errs)) => format!("Finalizado: {n} indexadas, {} errores", errs.len()),
+                Err(e) => format!("Error: {e}"),
+            };
+            babelcomics_core::helpers::background_jobs::finish_job(
+                &job_id_for_done,
+                status_message,
+                result.as_ref().map_or(true, |(_, errs)| !errs.is_empty()),
+            );
+
             let Some(ref ow) = overlay_weak else { return };
             let Some(overlay) = ow.upgrade() else { return };
             let total = stats.total;
@@ -345,7 +478,7 @@ pub(crate) fn run_clip_generation(
             let pendientes = stats.pendientes;
             let msg = match result {
                 Ok((0, _)) if con_archivo == 0 => {
-                    format!("Sin portadas descargadas ({total} issues en BD).")
+                    format!("Sin portadas descargadas ({total} números en BD).")
                 }
                 Ok((0, _)) => {
                     format!("{indexadas} portadas ya indexadas de {con_archivo} con archivo local")
@@ -446,7 +579,7 @@ pub fn add_tab(tab_view: &adw::TabView, kind: TabKind) -> adw::TabPage {
             pages::publishers::build(),
         ),
         TabKind::Downloads(pool) => (
-            "Descargas".into(),
+            "Actividad".into(),
             "folder-download-symbolic",
             pages::downloads::build(pool),
         ),
@@ -468,9 +601,17 @@ pub fn add_tab(tab_view: &adw::TabView, kind: TabKind) -> adw::TabPage {
 
     let page = tab_view.append(&content);
     page.set_title(&title);
-    page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
+    if title == "Editoriales" {
+        page.set_icon(Some(&editorial_file_icon()));
+    } else {
+        page.set_icon(Some(&gio::ThemedIcon::new(icon_name)));
+    }
     page.set_needs_attention(false);
     page
+}
+
+fn editorial_file_icon() -> gio::FileIcon {
+    gio::FileIcon::new(&gio::File::for_path(EDITORIAL_ICON_PATH))
 }
 
 // ---------------------------------------------------------------------------
@@ -500,9 +641,9 @@ fn build_tab_type_popover(tab_view: &adw::TabView, pool: &SqlitePool) -> gtk::Po
             "accessories-dictionary-symbolic",
             TabKind::Volumes(pool.clone()),
         ),
-        ("Editoriales", "building-symbolic", TabKind::Publishers),
+        ("Editoriales", "editorial", TabKind::Publishers),
         (
-            "Descargas",
+            "Actividad",
             "folder-download-symbolic",
             TabKind::Downloads(pool.clone()),
         ),
@@ -518,7 +659,15 @@ fn build_tab_type_popover(tab_view: &adw::TabView, pool: &SqlitePool) -> gtk::Po
             .title(label_text)
             .activatable(true)
             .build();
-        row.add_prefix(&gtk::Image::builder().icon_name(icon).pixel_size(20).build());
+        let image = if label_text == "Editoriales" {
+            gtk::Image::builder()
+                .gicon(&editorial_file_icon())
+                .pixel_size(20)
+                .build()
+        } else {
+            gtk::Image::builder().icon_name(icon).pixel_size(20).build()
+        };
+        row.add_prefix(&image);
 
         let tv = tab_view.clone();
         let popover_ref = popover.downgrade();
@@ -565,7 +714,7 @@ fn build_selector_page(tab_view: &adw::TabView, pool: SqlitePool) -> gtk::Widget
         ),
         ("Editoriales", "building-symbolic", TabKind::Publishers),
         (
-            "Descargas",
+            "Actividad",
             "folder-download-symbolic",
             TabKind::Downloads(pool.clone()),
         ),

@@ -303,6 +303,10 @@ pub async fn generate_clip_embeddings(
         generated,
         errors.len()
     );
+    if generated > 0 || !errors.is_empty() {
+        crate::helpers::suggestion_service::clear_clip_index_cache();
+        tracing::info!("CLIP: caché de índice invalidado");
+    }
     Ok((generated, errors))
 }
 

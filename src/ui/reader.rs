@@ -12,10 +12,10 @@ use libadwaita as adw;
 
 use sqlx::SqlitePool;
 
-use babelcomics_core::helpers::{extraction_registry, extractor, thumbnail};
-use babelcomics_core::helpers::thumbnail::ReaderFilter;
-use babelcomics_core::repositories::SetupRepository;
 use crate::ui::run_in_background;
+use babelcomics_core::helpers::thumbnail::ReaderFilter;
+use babelcomics_core::helpers::{extraction_registry, extractor, thumbnail};
+use babelcomics_core::repositories::SetupRepository;
 
 /// Número de thumbnails que se generan en paralelo.
 /// Valor bajo a propósito: cada página decodificada ocupa ~24-80 MB en RAM.
@@ -36,7 +36,6 @@ fn apply_thumbnail(img: &gtk::Image, t: thumbnail::PageThumb) {
     let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
     img.set_paintable(Some(&texture));
 }
-
 
 fn reader_thumb_dir(comic_path: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -369,7 +368,13 @@ impl ReaderWindow {
 
         run_in_background(
             tokio::runtime::Handle::current(),
-            thumbnail::load_page_thumb(comic_path, page_name, temp_dir, thumb_path, self.reader_filter.get()),
+            thumbnail::load_page_thumb(
+                comic_path,
+                page_name,
+                temp_dir,
+                thumb_path,
+                self.reader_filter.get(),
+            ),
             move |res| {
                 if !r.alive.get() {
                     return;

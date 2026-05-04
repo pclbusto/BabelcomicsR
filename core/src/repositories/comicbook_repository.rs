@@ -3,6 +3,14 @@ use sqlx::{Row, SqlitePool};
 
 use crate::models::{ComicFilter, Comicbook, ComicbookView, NewComicbook, parse_search_query};
 
+#[derive(Debug, Clone, Default)]
+pub struct CatalogMatchStats {
+    pub total_with_metrics: i64,
+    pub avg_selected_similarity: Option<f64>,
+    pub avg_best_similarity: Option<f64>,
+    pub not_best_count: i64,
+}
+
 pub struct ComicbookRepository<'a> {
     pool: &'a SqlitePool,
 }
@@ -22,7 +30,11 @@ impl<'a> ComicbookRepository<'a> {
                 en_papelera,
                 embedding,
                 error_ultimo_escaneo,
-                procesado
+                procesado,
+                catalog_match_similarity,
+                catalog_best_similarity,
+                catalog_selected_rank,
+                catalog_match_method
                FROM comicbooks WHERE id_comicbook = ?"#,
         )
         .bind(id)
@@ -41,7 +53,11 @@ impl<'a> ComicbookRepository<'a> {
                 en_papelera,
                 embedding,
                 error_ultimo_escaneo,
-                procesado
+                procesado,
+                catalog_match_similarity,
+                catalog_best_similarity,
+                catalog_selected_rank,
+                catalog_match_method
                FROM comicbooks WHERE path = ?"#,
         )
         .bind(path)
@@ -86,7 +102,11 @@ impl<'a> ComicbookRepository<'a> {
                 (SELECT cic.ruta_local
                  FROM comicbooks_info_covers cic
                  WHERE cic.id_comicbook_info = ci.id_comicbook_info
-                 LIMIT 1) AS ruta_cover
+                 LIMIT 1) AS ruta_cover,
+                cb.catalog_match_similarity,
+                cb.catalog_best_similarity,
+                cb.catalog_selected_rank,
+                cb.catalog_match_method
                FROM comicbooks cb
                LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
@@ -128,6 +148,10 @@ impl<'a> ComicbookRepository<'a> {
                 nombre_volume: r.get(9),
                 nombre_publisher: r.get(10),
                 ruta_cover: r.get(11),
+                catalog_match_similarity: r.get(12),
+                catalog_best_similarity: r.get(13),
+                catalog_selected_rank: r.get(14),
+                catalog_match_method: r.get(15),
             })
             .collect())
     }
@@ -150,7 +174,11 @@ impl<'a> ComicbookRepository<'a> {
                 (SELECT cic.ruta_local
                  FROM comicbooks_info_covers cic
                  WHERE cic.id_comicbook_info = ci.id_comicbook_info
-                 LIMIT 1) AS ruta_cover
+                 LIMIT 1) AS ruta_cover,
+                cb.catalog_match_similarity,
+                cb.catalog_best_similarity,
+                cb.catalog_selected_rank,
+                cb.catalog_match_method
                FROM comicbooks cb
                LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
@@ -174,6 +202,10 @@ impl<'a> ComicbookRepository<'a> {
             nombre_volume: r.get(9),
             nombre_publisher: r.get(10),
             ruta_cover: r.get(11),
+            catalog_match_similarity: r.get(12),
+            catalog_best_similarity: r.get(13),
+            catalog_selected_rank: r.get(14),
+            catalog_match_method: r.get(15),
         }))
     }
 
@@ -195,7 +227,11 @@ impl<'a> ComicbookRepository<'a> {
                 (SELECT cic.ruta_local
                  FROM comicbooks_info_covers cic
                  WHERE cic.id_comicbook_info = ci.id_comicbook_info
-                 LIMIT 1) AS ruta_cover
+                 LIMIT 1) AS ruta_cover,
+                cb.catalog_match_similarity,
+                cb.catalog_best_similarity,
+                cb.catalog_selected_rank,
+                cb.catalog_match_method
                FROM comicbooks cb
                LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
@@ -222,6 +258,10 @@ impl<'a> ComicbookRepository<'a> {
                 nombre_volume: r.get(9),
                 nombre_publisher: r.get(10),
                 ruta_cover: r.get(11),
+                catalog_match_similarity: r.get(12),
+                catalog_best_similarity: r.get(13),
+                catalog_selected_rank: r.get(14),
+                catalog_match_method: r.get(15),
             })
             .collect();
         Ok(views)
@@ -237,7 +277,11 @@ impl<'a> ComicbookRepository<'a> {
                 en_papelera,
                 embedding,
                 error_ultimo_escaneo,
-                procesado
+                procesado,
+                catalog_match_similarity,
+                catalog_best_similarity,
+                catalog_selected_rank,
+                catalog_match_method
                FROM comicbooks
                WHERE id_comicbook_info IS NULL AND en_papelera = 0
                ORDER BY path"#,
@@ -279,11 +323,48 @@ impl<'a> ComicbookRepository<'a> {
     }
 
     pub async fn set_info(&self, id: i64, info_id: Option<i64>) -> Result<()> {
-        sqlx::query("UPDATE comicbooks SET id_comicbook_info = ? WHERE id_comicbook = ?")
-            .bind(info_id)
-            .bind(id)
-            .execute(self.pool)
-            .await?;
+        sqlx::query(
+            r#"UPDATE comicbooks
+               SET id_comicbook_info = ?,
+                   catalog_match_similarity = NULL,
+                   catalog_best_similarity = NULL,
+                   catalog_selected_rank = NULL,
+                   catalog_match_method = NULL
+               WHERE id_comicbook = ?"#,
+        )
+        .bind(info_id)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_info_with_match_metrics(
+        &self,
+        id: i64,
+        info_id: i64,
+        selected_similarity: f64,
+        best_similarity: f64,
+        selected_rank: i64,
+        method: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"UPDATE comicbooks
+               SET id_comicbook_info = ?,
+                   catalog_match_similarity = ?,
+                   catalog_best_similarity = ?,
+                   catalog_selected_rank = ?,
+                   catalog_match_method = ?
+               WHERE id_comicbook = ?"#,
+        )
+        .bind(info_id)
+        .bind(selected_similarity)
+        .bind(best_similarity)
+        .bind(selected_rank)
+        .bind(method)
+        .bind(id)
+        .execute(self.pool)
+        .await?;
         Ok(())
     }
 
@@ -354,7 +435,11 @@ impl<'a> ComicbookRepository<'a> {
                 en_papelera,
                 embedding,
                 error_ultimo_escaneo,
-                procesado
+                procesado,
+                catalog_match_similarity,
+                catalog_best_similarity,
+                catalog_selected_rank,
+                catalog_match_method
                FROM comicbooks WHERE id_comicbook_info = ?"#,
         )
         .bind(info_id)
@@ -469,6 +554,30 @@ impl<'a> ComicbookRepository<'a> {
         .fetch_one(self.pool)
         .await?;
         Ok(row.get(0))
+    }
+
+    pub async fn catalog_match_stats(&self) -> Result<CatalogMatchStats> {
+        let row = sqlx::query(
+            r#"SELECT
+                   COUNT(*) AS total_with_metrics,
+                   AVG(catalog_match_similarity) AS avg_selected_similarity,
+                   AVG(catalog_best_similarity) AS avg_best_similarity,
+                   SUM(CASE WHEN catalog_selected_rank IS NOT NULL
+                             AND catalog_selected_rank > 1 THEN 1 ELSE 0 END) AS not_best_count
+               FROM comicbooks
+               WHERE en_papelera = 0
+                 AND id_comicbook_info IS NOT NULL
+                 AND catalog_match_similarity IS NOT NULL"#,
+        )
+        .fetch_one(self.pool)
+        .await?;
+
+        Ok(CatalogMatchStats {
+            total_with_metrics: row.get::<i64, _>(0),
+            avg_selected_similarity: row.get::<Option<f64>, _>(1),
+            avg_best_similarity: row.get::<Option<f64>, _>(2),
+            not_best_count: row.get::<Option<i64>, _>(3).unwrap_or(0),
+        })
     }
 }
 

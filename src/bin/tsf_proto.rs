@@ -60,12 +60,8 @@ impl TopologicalSignatureFlow {
         let img = image::open(image_path)
             .with_context(|| format!("No se pudo cargar {}", image_path.display()))?;
         let gray = img.to_luma8();
-        let resized = image::imageops::resize(
-            &gray,
-            self.resize_to,
-            self.resize_to,
-            FilterType::Triangle,
-        );
+        let resized =
+            image::imageops::resize(&gray, self.resize_to, self.resize_to, FilterType::Triangle);
 
         let mut features = Vec::new();
 
@@ -97,7 +93,8 @@ impl TopologicalSignatureFlow {
                     let idx = (y * w + x) as usize;
                     let center = prev[idx];
                     let north = prev[((y.saturating_sub(1)) * w + x) as usize];
-                    let south = prev[((y.min(h - 1).saturating_add(1).min(h - 1)) * w + x) as usize];
+                    let south =
+                        prev[((y.min(h - 1).saturating_add(1).min(h - 1)) * w + x) as usize];
                     let west = prev[(y * w + x.saturating_sub(1)) as usize];
                     let east = prev[(y * w + x.min(w - 1).saturating_add(1).min(w - 1)) as usize];
 
@@ -179,7 +176,8 @@ impl TopologicalSignatureFlow {
             }
         }
 
-        let mut features = Vec::with_capacity(self.n_landscape_functions * self.n_landscape_samples);
+        let mut features =
+            Vec::with_capacity(self.n_landscape_functions * self.n_landscape_samples);
         for level in levels {
             let mut sampled = resample_curve(&level, self.n_landscape_samples);
             normalize_curve(&mut sampled);
@@ -201,7 +199,10 @@ impl TopologicalSignatureFlow {
 
     fn build_index(&self, image_paths: &[PathBuf]) -> Result<StoredIndex> {
         let mut items = Vec::with_capacity(image_paths.len());
-        println!("Computando embeddings para {} imágenes...", image_paths.len());
+        println!(
+            "Computando embeddings para {} imágenes...",
+            image_paths.len()
+        );
 
         for (i, path) in image_paths.iter().enumerate() {
             let embedding = self.compute_embedding(path)?;
@@ -233,7 +234,12 @@ impl TopologicalSignatureFlow {
         })
     }
 
-    fn search_similar(&self, index: &StoredIndex, query_path: &Path, k: usize) -> Result<Vec<ScoredItem>> {
+    fn search_similar(
+        &self,
+        index: &StoredIndex,
+        query_path: &Path,
+        k: usize,
+    ) -> Result<Vec<ScoredItem>> {
         let query_embedding = self.compute_embedding(query_path)?;
         let query_norm = zscore_normalize(&query_embedding, &index.mean, &index.std);
 
@@ -267,7 +273,9 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&embedding)?);
         }
         "index" => {
-            let dir = args.get(1).context("Uso: tsf_proto index <dir> [--out archivo.json]")?;
+            let dir = args
+                .get(1)
+                .context("Uso: tsf_proto index <dir> [--out archivo.json]")?;
             let out = parse_flag_value(&args[2..], "--out")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/tmp/tsf_index.json"));
@@ -291,8 +299,7 @@ fn main() -> Result<()> {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(5);
             let index: StoredIndex = serde_json::from_slice(
-                &fs::read(index_path)
-                    .with_context(|| format!("No se pudo leer {}", index_path))?,
+                &fs::read(index_path).with_context(|| format!("No se pudo leer {}", index_path))?,
             )?;
             let results = tsf.search_similar(&index, Path::new(query_path), k)?;
             for (i, item) in results.iter().enumerate() {
@@ -331,7 +338,12 @@ fn collect_images(dir: &Path) -> Result<Vec<PathBuf>> {
                 && path
                     .extension()
                     .and_then(|ext| ext.to_str())
-                    .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp"))
+                    .map(|ext| {
+                        matches!(
+                            ext.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "webp" | "bmp"
+                        )
+                    })
                     .unwrap_or(false)
         })
         .collect::<Vec<_>>();
@@ -539,7 +551,11 @@ fn run_demo(tsf: &TopologicalSignatureFlow) -> Result<()> {
     println!("============================================================");
 
     let index = tsf.build_index(&paths)?;
-    println!("Embeddings computados: {} x {}", index.items.len(), tsf.embedding_dim);
+    println!(
+        "Embeddings computados: {} x {}",
+        index.items.len(),
+        tsf.embedding_dim
+    );
 
     let query = temp_dir.join("ring.png");
     let results = tsf.search_similar(&index, &query, 3)?;

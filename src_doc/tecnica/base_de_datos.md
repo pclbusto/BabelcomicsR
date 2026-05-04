@@ -20,7 +20,7 @@ La ventaja crítica de usar **SQLx** en este proyecto es el **tipado fuerte** de
 
 ### Ejemplo de Consulta Tipada
 
-```rust
+```rust,ignore
 pub async fn get_setup(&self) -> Result<Setup> {
     let row = sqlx::query_as!(
         Setup,

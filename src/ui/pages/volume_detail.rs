@@ -8,10 +8,12 @@ use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
+use crate::ui::run_in_background;
 use babelcomics_core::helpers::download_manager::DownloadManager;
 use babelcomics_core::models::{ComicbookInfoView, Volume};
-use babelcomics_core::repositories::{ComicbookInfoRepository, PublisherRepository, VolumeRepository};
-use crate::ui::run_in_background;
+use babelcomics_core::repositories::{
+    ComicbookInfoRepository, PublisherRepository, VolumeRepository,
+};
 
 #[derive(Clone, Copy)]
 struct ClipDialogStats {
@@ -25,7 +27,7 @@ struct ClipDialogStats {
 fn build_clip_dialog_body(stats: ClipDialogStats) -> String {
     if stats.total_all_candidates == 0 {
         return format!(
-            "Este volumen no tiene portadas candidatas para indexar.\nHay {} issues en BD y {} embeddings ya guardados.",
+            "Este volumen no tiene portadas candidatas para indexar.\nHay {} números en BD y {} embeddings ya guardados.",
             stats.total_db, stats.indexadas
         );
     }
@@ -86,7 +88,7 @@ pub fn build(volume_id: i64, pool: SqlitePool) -> gtk::Widget {
             // Pestaña: Issues
             let issues_content = build_issues_tab(volume_id, &name, pool_v2, tab_view_v.clone());
             let issues_page = tab_view_v.append(&issues_content);
-            issues_page.set_title("Issues");
+            issues_page.set_title("Números");
             issues_page.set_icon(Some(&gio::ThemedIcon::new("view-list-symbolic")));
         },
     );
@@ -217,7 +219,9 @@ fn build_info_content(
         run_in_background(
             tokio::runtime::Handle::current(),
             async move {
-                if let Some(bytes) = babelcomics_core::helpers::download_manager::fetch_image_bytes(&url).await {
+                if let Some(bytes) =
+                    babelcomics_core::helpers::download_manager::fetch_image_bytes(&url).await
+                {
                     if let Some(parent) = vt_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
@@ -318,7 +322,7 @@ fn build_info_content(
         // ── Actualizar desde ComicVine ──────────────────────────────────────────
         let update_row = adw::ActionRow::builder()
             .title("Actualizar desde ComicVine")
-            .subtitle("Descarga issues y portadas usando el ID de ComicVine")
+            .subtitle("Descarga números y portadas usando el ID de ComicVine")
             .build();
 
         let update_btn = gtk::Button::builder()
@@ -349,7 +353,7 @@ fn build_info_content(
                 let dialog = adw::AlertDialog::builder()
                     .heading("Actualizar volumen")
                     .body(format!(
-                        "Se sincronizará «{}» con ComicVine.\n¿Descargar también las portadas de los issues?",
+                        "Se sincronizará «{}» con ComicVine.\n¿Descargar también las portadas de los números?",
                         vol_nombre
                     ))
                     .build();
@@ -516,7 +520,7 @@ fn build_info_content(
                         btn_start.set_sensitive(false);
                         progress_title_start.set_label("Generando embeddings CLIP");
                         progress_subtitle_start.set_label(&format!(
-                            "0/{} procesados, {} restantes",
+                            "0/{} procesadas, {} restantes",
                             total_target,
                             total_target
                         ));
@@ -544,7 +548,7 @@ fn build_info_content(
                                         };
                                         progress_title_poll.set_label("Generando embeddings CLIP");
                                         progress_subtitle_poll.set_label(&format!(
-                                            "{}/{} procesados, {} restantes, {} generados, {} errores",
+                                            "{}/{} procesadas, {} restantes, {} generadas, {} errores",
                                             progress.processed,
                                             progress.total,
                                             remaining,
@@ -566,7 +570,7 @@ fn build_info_content(
                                             Ok((0, _)) if stats.con_archivo == 0 => {
                                                 progress_title_poll.set_label("Sin portadas descargadas");
                                                 progress_subtitle_poll.set_label(&format!(
-                                                    "Hay {} issues en BD, pero ninguna portada local para indexar.",
+                                                    "Hay {} números en BD, pero ninguna portada local para indexar.",
                                                     stats.total
                                                 ));
                                                 progress_bar_poll.set_fraction(0.0);
@@ -580,7 +584,7 @@ fn build_info_content(
                                                 };
                                                 progress_title_poll.set_label(status);
                                                 progress_subtitle_poll.set_label(&format!(
-                                                    "{} generados, {} errores, {} pendientes en el volumen",
+                                                    "{} generadas, {} errores, {} pendientes en el volumen",
                                                     generated,
                                                     errs.len(),
                                                     stats.pendientes.saturating_sub(generated as i64)
@@ -651,7 +655,21 @@ fn build_issues_tab(
         .hexpand(true)
         .build();
 
-    let check_poseidos = gtk::CheckButton::with_label("Solo poseídos");
+    let btn_todos = gtk::ToggleButton::builder()
+        .label("Todos")
+        .active(true)
+        .build();
+    let btn_poseidos = gtk::ToggleButton::builder().label("Poseídos").build();
+    let btn_no_poseidos = gtk::ToggleButton::builder().label("No poseídos").build();
+    btn_poseidos.set_group(Some(&btn_todos));
+    btn_no_poseidos.set_group(Some(&btn_todos));
+    let filter_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_classes(["linked"])
+        .build();
+    filter_box.append(&btn_todos);
+    filter_box.append(&btn_poseidos);
+    filter_box.append(&btn_no_poseidos);
 
     let toolbar_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -662,7 +680,7 @@ fn build_issues_tab(
         .margin_end(12)
         .build();
     toolbar_box.append(&search_entry);
-    toolbar_box.append(&check_poseidos);
+    toolbar_box.append(&filter_box);
     main_vbox.append(&toolbar_box);
 
     // ── Grid ─────────────────────────────────────────────────────────────────
@@ -689,7 +707,7 @@ fn build_issues_tab(
     let loading: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let all_loaded: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let query: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    let poseidos: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let poseidos: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
     let v_name = Rc::new(volume_name.to_string());
 
     const PAGE: i64 = 50;
@@ -730,8 +748,9 @@ fn build_issues_tab(
                         .get()
                         .await
                         .unwrap_or_default();
-                    let card_size =
-                        babelcomics_core::helpers::thumbnail::CardSize::from_db(setup.thumbnail_size);
+                    let card_size = babelcomics_core::helpers::thumbnail::CardSize::from_db(
+                        setup.thumbnail_size,
+                    );
                     let issues = ComicbookInfoRepository::new(&pool_t)
                         .get_view_by_volume_page(volume_id, PAGE, cur_off, q.as_deref(), solo)
                         .await
@@ -813,9 +832,31 @@ fn build_issues_tab(
     {
         let poseidos = poseidos.clone();
         let reset_p = reset.clone();
-        check_poseidos.connect_toggled(move |btn| {
-            poseidos.set(btn.is_active());
-            reset_p();
+        btn_todos.connect_toggled(move |btn| {
+            if btn.is_active() {
+                poseidos.set(None);
+                reset_p();
+            }
+        });
+    }
+    {
+        let poseidos = poseidos.clone();
+        let reset_p = reset.clone();
+        btn_poseidos.connect_toggled(move |btn| {
+            if btn.is_active() {
+                poseidos.set(Some(true));
+                reset_p();
+            }
+        });
+    }
+    {
+        let poseidos = poseidos.clone();
+        let reset_p = reset.clone();
+        btn_no_poseidos.connect_toggled(move |btn| {
+            if btn.is_active() {
+                poseidos.set(Some(false));
+                reset_p();
+            }
         });
     }
 

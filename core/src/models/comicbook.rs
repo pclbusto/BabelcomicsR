@@ -10,6 +10,10 @@ pub struct Comicbook {
     pub embedding: Option<String>, // JSON vector
     pub error_ultimo_escaneo: Option<String>,
     pub procesado: bool,
+    pub catalog_match_similarity: Option<f64>,
+    pub catalog_best_similarity: Option<f64>,
+    pub catalog_selected_rank: Option<i64>,
+    pub catalog_match_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +42,10 @@ pub struct ComicbookView {
     pub nombre_publisher: Option<String>,
     // Ruta local de la portada
     pub ruta_cover: Option<String>,
+    pub catalog_match_similarity: Option<f64>,
+    pub catalog_best_similarity: Option<f64>,
+    pub catalog_selected_rank: Option<i64>,
+    pub catalog_match_method: Option<String>,
 }
 /// Filtros para la búsqueda de comics
 #[derive(Debug, Clone, Default, PartialEq)]

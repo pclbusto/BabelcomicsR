@@ -26,6 +26,7 @@ pub struct DownloadInfo {
     pub message: String,
     pub status: DownloadStatus,
     pub download_covers: bool,
+    pub background_job_id: String,
 }
 
 #[derive(Clone)]
@@ -43,6 +44,12 @@ pub struct DownloadManager {
     active_downloads: Arc<Mutex<HashMap<String, DownloadInfo>>>,
     tx_queue: mpsc::UnboundedSender<String>,
     tx_events: broadcast::Sender<DownloadEvent>,
+}
+
+struct DownloadResult {
+    volume_id: i64,
+    downloaded_issues: usize,
+    total_issues: usize,
 }
 
 lazy_static::lazy_static! {
@@ -81,7 +88,13 @@ impl DownloadManager {
         self.active_downloads.clone()
     }
 
-    pub fn add_download(&self, cv_id: i64, name: &str, count_of_issues: i64, download_covers: bool) {
+    pub fn add_download(
+        &self,
+        cv_id: i64,
+        name: &str,
+        count_of_issues: i64,
+        download_covers: bool,
+    ) {
         if cv_id == 0 {
             return;
         }
@@ -92,6 +105,11 @@ impl DownloadManager {
             return;
         }
 
+        let background_job_id = crate::helpers::background_jobs::start_job(
+            name,
+            "En cola...",
+            crate::helpers::background_jobs::JobKind::Download,
+        );
         let info = DownloadInfo {
             volume_cv_id: cv_id_str.clone(),
             title: name.to_string(),
@@ -100,6 +118,7 @@ impl DownloadManager {
             message: "En cola...".to_string(),
             status: DownloadStatus::Queued,
             download_covers,
+            background_job_id,
         };
 
         active.insert(cv_id_str.clone(), info);
@@ -118,29 +137,81 @@ impl DownloadManager {
                 self.update_status(&cv_id, DownloadStatus::Downloading, 0.0, "Iniciando...");
 
                 match self.process_download(&cv_id).await {
-                    Ok(volume_id) => {
-                        self.update_status(&cv_id, DownloadStatus::Completed, 1.0, "¡Completado!");
-                        let _ = self.tx_events.send(DownloadEvent::Completed(cv_id));
+                    Ok(result) => {
+                        let completed_msg = format!(
+                            "Completado: {}/{} números",
+                            result.downloaded_issues, result.total_issues
+                        );
+                        self.update_status(&cv_id, DownloadStatus::Completed, 1.0, &completed_msg);
+                        let _ = self.tx_events.send(DownloadEvent::Completed(cv_id.clone()));
 
-                        // Indexar las portadas recién descargadas con CLIP en segundo plano.
-                        // Solo procesamos este volumen para evitar saturar la CPU con otros pendientes.
+                        let volume_title = {
+                            let active = self.active_downloads.lock().unwrap();
+                            active
+                                .get(&cv_id)
+                                .map(|i| i.title.clone())
+                                .unwrap_or_else(|| format!("Volumen {}", result.volume_id))
+                        };
+                        let volume_id = result.volume_id;
+
                         let pool = self.pool.clone();
                         tokio::spawn(async move {
+                            let job_id = crate::helpers::background_jobs::start_job(
+                                format!("Embeddings CLIP — {volume_title}"),
+                                "Iniciando indexación...",
+                                crate::helpers::background_jobs::JobKind::Clip,
+                            );
+
+                            let (progress_tx, progress_rx) = std::sync::mpsc::channel::<
+                                crate::helpers::scan_service::ClipGenerationProgress,
+                            >();
+                            let job_id_thread = job_id.clone();
+                            std::thread::spawn(move || {
+                                while let Ok(p) = progress_rx.recv() {
+                                    let fraction = if p.total > 0 {
+                                        p.processed as f64 / p.total as f64
+                                    } else {
+                                        1.0
+                                    };
+                                    crate::helpers::background_jobs::update_job(
+                                        &job_id_thread,
+                                        format!("{}/{} portadas indexadas", p.processed, p.total),
+                                        fraction,
+                                    );
+                                }
+                            });
+
                             match crate::helpers::scan_service::generate_clip_embeddings(
                                 &pool,
                                 Some(volume_id),
                                 true,
-                                None,
+                                Some(progress_tx),
                             )
                             .await
                             {
-                                Ok((n, _)) if n > 0 => tracing::info!(
-                                    "CLIP: {} portadas nuevas indexadas tras descarga del volumen {}",
-                                    n,
-                                    volume_id
-                                ),
-                                Err(e) => tracing::warn!("CLIP post-descarga: {e}"),
-                                _ => {}
+                                Ok((n, errs)) => {
+                                    let msg = if errs.is_empty() {
+                                        format!("{n} portadas indexadas")
+                                    } else {
+                                        format!("{n} indexadas, {} errores", errs.len())
+                                    };
+                                    tracing::info!(
+                                        "CLIP: {n} portadas indexadas tras descarga del volumen {volume_id}"
+                                    );
+                                    crate::helpers::background_jobs::finish_job(
+                                        &job_id,
+                                        msg,
+                                        !errs.is_empty(),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!("CLIP post-descarga: {e}");
+                                    crate::helpers::background_jobs::finish_job(
+                                        &job_id,
+                                        format!("Error: {e}"),
+                                        true,
+                                    );
+                                }
                             }
                         });
                     }
@@ -160,20 +231,36 @@ impl DownloadManager {
     }
 
     fn update_status(&self, cv_id: &str, status: DownloadStatus, progress: f64, msg: &str) {
-        let mut active = self.active_downloads.lock().unwrap();
-        if let Some(info) = active.get_mut(cv_id) {
-            info.status = status;
-            info.progress = progress;
-            info.message = msg.to_string();
-            let _ = self.tx_events.send(DownloadEvent::Progress(
-                cv_id.to_string(),
-                progress,
-                msg.to_string(),
-            ));
+        let bg_info = {
+            let mut active = self.active_downloads.lock().unwrap();
+            active.get_mut(cv_id).map(|info| {
+                info.status = status.clone();
+                info.progress = progress;
+                info.message = msg.to_string();
+                let _ = self.tx_events.send(DownloadEvent::Progress(
+                    cv_id.to_string(),
+                    progress,
+                    msg.to_string(),
+                ));
+                (info.background_job_id.clone(), status)
+            })
+        };
+        if let Some((job_id, status)) = bg_info {
+            match status {
+                DownloadStatus::Completed => {
+                    crate::helpers::background_jobs::finish_job(&job_id, msg, false);
+                }
+                DownloadStatus::Error(_) => {
+                    crate::helpers::background_jobs::finish_job(&job_id, msg, true);
+                }
+                _ => {
+                    crate::helpers::background_jobs::update_job(&job_id, msg, progress);
+                }
+            }
         }
     }
 
-    async fn process_download(&self, cv_id: &str) -> anyhow::Result<i64> {
+    async fn process_download(&self, cv_id: &str) -> anyhow::Result<DownloadResult> {
         // 1. Obtener API key y crear cliente
         let setup = SetupRepository::new(&self.pool).get().await?;
         let api_key = setup
@@ -276,13 +363,14 @@ impl DownloadManager {
             "Obteniendo lista de números...",
         );
         let issues = client.get_volume_issues(cv_id).await;
-        let total = issues.len().max(1);
+        let total_issues = issues.len();
+        let total_for_progress = total_issues.max(1);
 
         // Cruce: Si la cantidad de issues obtenidos difiere de vol_count, actualizar el volumen
-        if issues.len() as i64 != vol_count {
+        if total_issues as i64 != vol_count {
             let v_repo = VolumeRepository::new(&self.pool);
             if let Ok(Some(mut vol)) = v_repo.get_by_id(volume_id).await {
-                vol.cantidad_numeros = issues.len() as i64;
+                vol.cantidad_numeros = total_issues as i64;
                 let _ = v_repo.update(&vol).await;
             }
         }
@@ -296,10 +384,11 @@ impl DownloadManager {
                 .unwrap_or(false)
         };
 
+        let mut downloaded_issues = 0usize;
         for (i, issue) in issues.iter().enumerate() {
-            let progress = 0.10 + 0.90 * (i as f64 / total as f64);
+            let progress = 0.10 + 0.90 * (i as f64 / total_for_progress as f64);
             let issue_num = issue["issue_number"].as_str().unwrap_or("?");
-            let msg = format!("Número {} ({}/{})", issue_num, i + 1, total);
+            let msg = format!("Número {} ({}/{})", issue_num, i + 1, total_issues);
             self.update_status(cv_id, DownloadStatus::Downloading, progress, &msg);
 
             let issue_cv_id = match issue["id"].as_i64() {
@@ -382,9 +471,15 @@ impl DownloadManager {
                     }
                 }
             }
+
+            downloaded_issues += 1;
         }
 
-        Ok(volume_id)
+        Ok(DownloadResult {
+            volume_id,
+            downloaded_issues,
+            total_issues,
+        })
     }
 
     async fn upsert_publisher(&self, vol_details: &Value) -> anyhow::Result<i64> {

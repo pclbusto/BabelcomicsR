@@ -1,7 +1,7 @@
 use adw::prelude::*;
 use anyhow::Result;
-use babelcomics_core::helpers::paths;
 use babelcomics::ui::reader::ReaderWindow;
+use babelcomics_core::helpers::paths;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gio};
 use libadwaita as adw;

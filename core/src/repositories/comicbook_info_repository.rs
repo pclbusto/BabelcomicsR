@@ -16,17 +16,18 @@ impl<'a> ComicbookInfoRepository<'a> {
         &self,
         volume_id: i64,
     ) -> Result<Vec<crate::models::ComicbookInfoView>> {
-        self.get_view_by_volume_page(volume_id, i64::MAX, 0, None, false)
+        self.get_view_by_volume_page(volume_id, i64::MAX, 0, None, None)
             .await
     }
 
+    /// `filtro_poseidos`: `None` = todos, `Some(true)` = solo poseídos, `Some(false)` = solo no poseídos.
     pub async fn get_view_by_volume_page(
         &self,
         volume_id: i64,
         limit: i64,
         offset: i64,
         query: Option<&str>,
-        solo_poseidos: bool,
+        filtro_poseidos: Option<bool>,
     ) -> Result<Vec<crate::models::ComicbookInfoView>> {
         let pattern = query.map(|q| format!("%{}%", q));
         let sql = format!(
@@ -48,10 +49,12 @@ impl<'a> ComicbookInfoRepository<'a> {
             } else {
                 ""
             },
-            if solo_poseidos {
-                "AND (SELECT COUNT(*) FROM comicbooks cb WHERE cb.id_comicbook_info = ci.id_comicbook_info) > 0"
-            } else {
-                ""
+            match filtro_poseidos {
+                Some(true) =>
+                    "AND (SELECT COUNT(*) FROM comicbooks cb WHERE cb.id_comicbook_info = ci.id_comicbook_info) > 0",
+                Some(false) =>
+                    "AND (SELECT COUNT(*) FROM comicbooks cb WHERE cb.id_comicbook_info = ci.id_comicbook_info) = 0",
+                None => "",
             },
         );
 

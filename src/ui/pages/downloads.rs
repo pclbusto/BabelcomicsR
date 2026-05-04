@@ -7,16 +7,19 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
+use tokio::sync::broadcast::error::RecvError;
 
-use babelcomics_core::helpers::download_manager::{DownloadManager, DownloadStatus};
+use babelcomics_core::helpers::background_jobs::{
+    BackgroundJobStatus, JobKind, snapshot, subscribe_jobs,
+};
 
-struct DownloadRow {
+struct StatusRow {
     row: adw::ActionRow,
     progress: gtk::ProgressBar,
     status_icon: gtk::Image,
 }
 
-pub fn build(pool: SqlitePool) -> gtk::Widget {
+pub fn build(_pool: SqlitePool) -> gtk::Widget {
     let toolbar = adw::ToolbarView::new();
 
     let scrolled = gtk::ScrolledWindow::builder()
@@ -34,8 +37,8 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
         .build();
 
     let placeholder = adw::StatusPage::builder()
-        .title("Sin descargas activas")
-        .description("Las descargas de metadatos y portadas de ComicVine aparecerán aquí")
+        .title("Sin actividad")
+        .description("Las descargas, la indexación CLIP y otras tareas aparecerán aquí")
         .icon_name("folder-download-symbolic")
         .build();
 
@@ -47,89 +50,121 @@ pub fn build(pool: SqlitePool) -> gtk::Widget {
     scrolled.set_child(Some(&list_box));
     toolbar.set_content(Some(&stack));
 
-    // Mapa de filas por cv_id
-    let rows: Rc<RefCell<HashMap<String, DownloadRow>>> = Rc::new(RefCell::new(HashMap::new()));
+    let rows: Rc<RefCell<HashMap<String, StatusRow>>> = Rc::new(RefCell::new(HashMap::new()));
 
-    let dm = DownloadManager::get_instance(pool);
-    let state = dm.get_state();
-
-    // Polling cada 250 ms
     let list_box_weak = list_box.downgrade();
     let stack_weak = stack.downgrade();
     let rows_clone = rows.clone();
 
-    glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-        let (list_box, stack) = match (list_box_weak.upgrade(), stack_weak.upgrade()) {
-            (Some(l), Some(s)) => (l, s),
-            _ => return glib::ControlFlow::Break,
-        };
+    render_jobs_snapshot(&list_box, &stack, &rows);
 
-        let downloads = state.lock().unwrap();
-        let mut rows_map = rows_clone.borrow_mut();
-
-        // Añadir filas nuevas
-        for (cv_id, info) in downloads.iter() {
-            if !rows_map.contains_key(cv_id) {
-                let row = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&info.title).as_str())
-                    .subtitle(glib::markup_escape_text(&info.message).as_str())
-                    .build();
-
-                let status_icon = gtk::Image::builder()
-                    .icon_name(status_icon_name(&info.status))
-                    .pixel_size(20)
-                    .build();
-                row.add_prefix(&status_icon);
-
-                let progress = gtk::ProgressBar::builder()
-                    .fraction(info.progress)
-                    .valign(gtk::Align::Center)
-                    .width_request(120)
-                    .build();
-                row.add_suffix(&progress);
-
-                list_box.append(&row);
-                stack.set_visible_child_name("list");
-
-                rows_map.insert(
-                    cv_id.clone(),
-                    DownloadRow {
-                        row,
-                        progress,
-                        status_icon,
-                    },
-                );
+    // Future local en el hilo GTK: se suspende esperando notificaciones del broadcast
+    // y actualiza la UI cuando llega un evento real de cambio de job.
+    glib::MainContext::default().spawn_local(async move {
+        let mut rx = subscribe_jobs();
+        loop {
+            match rx.recv().await {
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
             }
+
+            let (list_box, stack) = match (list_box_weak.upgrade(), stack_weak.upgrade()) {
+                (Some(l), Some(s)) => (l, s),
+                _ => break,
+            };
+
+            render_jobs_snapshot(&list_box, &stack, &rows_clone);
         }
-
-        // Actualizar filas existentes
-        for (cv_id, dr) in rows_map.iter() {
-            if let Some(info) = downloads.get(cv_id) {
-                dr.row
-                    .set_subtitle(glib::markup_escape_text(&info.message).as_str());
-                dr.progress.set_fraction(info.progress);
-                dr.status_icon
-                    .set_icon_name(Some(status_icon_name(&info.status)));
-
-                if matches!(info.status, DownloadStatus::Error(_)) {
-                    dr.row.add_css_class("error");
-                } else {
-                    dr.row.remove_css_class("error");
-                }
-            }
-        }
-
-        glib::ControlFlow::Continue
     });
 
     toolbar.upcast()
 }
 
-fn status_icon_name(status: &DownloadStatus) -> &'static str {
+fn render_jobs_snapshot(
+    list_box: &gtk::ListBox,
+    stack: &gtk::Stack,
+    rows: &Rc<RefCell<HashMap<String, StatusRow>>>,
+) {
+    let jobs = snapshot();
+    let mut rows_map = rows.borrow_mut();
+
+    for job in &jobs {
+        if !rows_map.contains_key(&job.id) {
+            let row = build_status_row(
+                &job.title,
+                &job.message,
+                icon_name(&job.kind, &job.status),
+                job.progress,
+            );
+            list_box.append(&row.row);
+            rows_map.insert(job.id.clone(), row);
+        }
+        if let Some(sr) = rows_map.get(&job.id) {
+            sr.row
+                .set_subtitle(glib::markup_escape_text(&job.message).as_str());
+            sr.progress.set_fraction(job.progress);
+            sr.status_icon
+                .set_icon_name(Some(icon_name(&job.kind, &job.status)));
+
+            if matches!(job.status, BackgroundJobStatus::Error) {
+                sr.row.add_css_class("error");
+            } else {
+                sr.row.remove_css_class("error");
+            }
+        }
+    }
+
+    // Eliminar filas de jobs que ya no están en el snapshot (purgados por TTL)
+    let live_ids: std::collections::HashSet<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+    rows_map.retain(|id, row| {
+        if live_ids.contains(id.as_str()) {
+            true
+        } else {
+            list_box.remove(&row.row);
+            false
+        }
+    });
+
+    if rows_map.is_empty() {
+        stack.set_visible_child_name("empty");
+    } else {
+        stack.set_visible_child_name("list");
+    }
+}
+
+fn build_status_row(title: &str, message: &str, icon: &str, fraction: f64) -> StatusRow {
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(title).as_str())
+        .subtitle(glib::markup_escape_text(message).as_str())
+        .build();
+
+    let status_icon = gtk::Image::builder().icon_name(icon).pixel_size(20).build();
+    row.add_prefix(&status_icon);
+
+    let progress = gtk::ProgressBar::builder()
+        .fraction(fraction)
+        .valign(gtk::Align::Center)
+        .width_request(120)
+        .build();
+    row.add_suffix(&progress);
+
+    StatusRow {
+        row,
+        progress,
+        status_icon,
+    }
+}
+
+fn icon_name(kind: &JobKind, status: &BackgroundJobStatus) -> &'static str {
     match status {
-        DownloadStatus::Queued => "emblem-system-symbolic",
-        DownloadStatus::Downloading => "folder-download-symbolic",
-        DownloadStatus::Completed => "emblem-ok-symbolic",
-        DownloadStatus::Error(_) => "dialog-error-symbolic",
+        BackgroundJobStatus::Completed => "emblem-ok-symbolic",
+        BackgroundJobStatus::Error => "dialog-error-symbolic",
+        BackgroundJobStatus::Running => match kind {
+            JobKind::Download => "folder-download-symbolic",
+            JobKind::Clip => "brain-augemnted-symbolic",
+            JobKind::Scan => "folder-open-symbolic",
+            JobKind::Thumbnail => "image-x-generic-symbolic",
+            JobKind::Import => "document-import-symbolic",
+        },
     }
 }
