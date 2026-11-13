@@ -1,5 +1,7 @@
 use std::cell::OnceCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk4::prelude::*;
@@ -8,16 +10,74 @@ use libadwaita as adw;
 use sqlx::SqlitePool;
 
 use crate::ui::{self, reader, window};
-use babelcomics_core::helpers::{scan_service, thumbnail::CardSize};
-use babelcomics_core::repositories::SetupRepository;
+use babelcomics_core::helpers::scan_service;
 
 const APP_ID: &str = "com.github.babelcomics";
+static APP_RUN_RETURNED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn run(pool: SqlitePool) {
+    APP_RUN_RETURNED.store(false, Ordering::Relaxed);
+    SHUTDOWN_WATCHDOG_STARTED.store(false, Ordering::Relaxed);
+
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
+
+    let force_activate_without_files = std::env::args_os().len() == 1;
+    app.connect_startup(move |app| {
+        tracing::debug!(is_remote = app.is_remote(), "Señal startup de GTK recibida");
+
+        if force_activate_without_files {
+            let app = app.clone();
+            glib::idle_add_local_once(move || {
+                if app.windows().is_empty() {
+                    tracing::debug!(
+                        is_remote = app.is_remote(),
+                        "Sin ventana tras startup; forzando activate()"
+                    );
+                    app.activate();
+                }
+            });
+        }
+    });
+
+    app.connect_window_removed(|app, window| {
+        let windows = app.windows().len();
+        tracing::debug!(
+            windows,
+            active_background_tasks = ui::active_background_tasks(),
+            title = ?window.title(),
+            "Ventana removida de la aplicación"
+        );
+        if windows == 0 {
+            ui::log_pending_background_callbacks("última ventana removida");
+            ui::abort_pending_background_callbacks("última ventana removida");
+        }
+    });
+
+    app.connect_shutdown(|_| {
+        tracing::debug!(
+            active_background_tasks = ui::active_background_tasks(),
+            "Señal shutdown de GTK recibida"
+        );
+        ui::log_pending_background_callbacks("shutdown GTK");
+        ui::abort_pending_background_callbacks("shutdown GTK");
+        scan_service::STOP_THREADS.store(true, Ordering::Relaxed);
+
+        if !SHUTDOWN_WATCHDOG_STARTED.swap(true, Ordering::Relaxed) {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(750));
+                if !APP_RUN_RETURNED.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "Babelcomics: GTK emitió shutdown pero app.run() no retornó; forzando salida inmediata."
+                    );
+                    force_process_exit(0);
+                }
+            });
+        }
+    });
 
     let pool_cell: Rc<OnceCell<SqlitePool>> = Rc::new(OnceCell::new());
     let _ = pool_cell.set(pool);
@@ -28,6 +88,11 @@ pub fn run(pool: SqlitePool) {
     // Señal OPEN: se dispara cuando el sistema pide abrir archivos (ej: doble clic en Nautilus)
     {
         app.connect_open(move |app, files, _| {
+            tracing::debug!(
+                is_remote = app.is_remote(),
+                file_count = files.len(),
+                "Señal open de GTK recibida"
+            );
             for file in files {
                 if let Some(path) = file.path() {
                     let path_str = path.to_string_lossy().to_string();
@@ -44,6 +109,13 @@ pub fn run(pool: SqlitePool) {
     let prefs_cache_activate = prefs_cache.clone();
 
     app.connect_activate(move |app| {
+        tracing::debug!(
+            is_remote = app.is_remote(),
+            windows = app.windows().len(),
+            "Señal activate de GTK recibida"
+        );
+        ui::install_main_loop_stall_monitor();
+
         // Limpiar cachés huérfanos de sesiones anteriores (crashes, apagones, etc.)
         babelcomics_core::helpers::extraction_registry::cleanup_stale();
 
@@ -84,45 +156,8 @@ pub fn run(pool: SqlitePool) {
                 });
             }
 
-            // Tareas de mantenimiento al arranque (en segundo plano)
-            let pool_boot = pool.clone();
-            ui::run_in_background(
-                tokio::runtime::Handle::current(),
-                async move {
-                    let setup = SetupRepository::new(&pool_boot)
-                        .get()
-                        .await
-                        .unwrap_or_default();
-
-                    // 1. Reparar thumbnails que quedaron a medias
-                    let card_size = CardSize::from_db(setup.thumbnail_size);
-                    let thumb_res =
-                        scan_service::generate_missing_thumbnails(&pool_boot, card_size).await;
-
-                    // 2. Generar embeddings CLIP (solo si el usuario lo tiene activado)
-                    let clip_res = if setup.clip_al_arranque {
-                        Some(scan_service::generate_missing_clip_embeddings(&pool_boot).await)
-                    } else {
-                        None
-                    };
-
-                    (thumb_res, clip_res)
-                },
-                |(thumb_res, clip_res)| {
-                    if let Ok(r) = thumb_res {
-                        if r.covers_generated > 0 {
-                            tracing::info!(
-                                "Thumbnails faltantes regenerados al arranque: {}",
-                                r.covers_generated
-                            );
-                        }
-                    }
-                    if let Some(Ok((generated, _))) = clip_res {
-                        if generated > 0 {
-                            tracing::info!("Embeddings CLIP generados al arranque: {}", generated);
-                        }
-                    }
-                },
+            tracing::debug!(
+                "Mantenimiento pesado de thumbnails/CLIP omitido al arranque; se ejecuta bajo demanda"
             );
         } else {
             app.windows()[0].present();
@@ -131,10 +166,17 @@ pub fn run(pool: SqlitePool) {
 
     setup_actions(&app, pool_cell, prefs_cache);
 
+    tracing::debug!("Entrando a app.run()");
     app.run();
+    APP_RUN_RETURNED.store(true, Ordering::Relaxed);
+    tracing::debug!(
+        active_background_tasks = ui::active_background_tasks(),
+        "app.run() terminó"
+    );
 
     // Al salir de app.run() (ventana cerrada), activamos el flag de parada
-    scan_service::STOP_THREADS.store(true, std::sync::atomic::Ordering::Relaxed);
+    scan_service::STOP_THREADS.store(true, Ordering::Relaxed);
+    tracing::debug!("STOP_THREADS activado");
 }
 
 fn setup_actions(
@@ -194,4 +236,18 @@ fn setup_actions(
     app.set_accels_for_action("app.scan", &["<Control>r"]);
     app.set_accels_for_action("app.preferences", &["<Control>comma"]);
     app.set_accels_for_action("app.about", &[]);
+}
+
+#[cfg(unix)]
+fn force_process_exit(code: i32) -> ! {
+    unsafe extern "C" {
+        fn _exit(status: i32) -> !;
+    }
+
+    unsafe { _exit(code) }
+}
+
+#[cfg(not(unix))]
+fn force_process_exit(code: i32) -> ! {
+    std::process::exit(code);
 }

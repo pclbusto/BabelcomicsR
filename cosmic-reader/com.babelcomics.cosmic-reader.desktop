@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Lector de cómics
+GenericName=Lector de cómics
+Comment=Lee cómics CBZ, con lectura guiada por viñetas
+# OpenGL: la GPU de las tablets Bay Trail no tiene un Vulkan usable para wgpu.
+Exec=env WGPU_BACKEND=gl cosmic-reader %f
+Icon=image-x-generic
+Terminal=false
+Categories=Graphics;Viewer;Comics;
+MimeType=application/vnd.comicbook+zip;application/x-cbz;
+Keywords=comic;comics;cbz;historieta;manga;
+StartupWMClass=com.babelcomics.cosmic-reader
+StartupNotify=true

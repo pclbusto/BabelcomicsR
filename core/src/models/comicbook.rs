@@ -46,6 +46,10 @@ pub struct ComicbookView {
     pub catalog_best_similarity: Option<f64>,
     pub catalog_selected_rank: Option<i64>,
     pub catalog_match_method: Option<String>,
+    pub reading_total_pages: i64,
+    pub reading_visited_pages: i64,
+    pub reading_last_page_index: Option<i64>,
+    pub reading_completed_at: Option<String>,
 }
 /// Filtros para la búsqueda de comics
 #[derive(Debug, Clone, Default, PartialEq)]

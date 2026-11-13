@@ -26,7 +26,9 @@ type ThumbWidgets = Rc<RefCell<HashMap<i64, (Option<String>, glib::WeakRef<gtk::
 /// La decodificación la hace GTK con libjpeg-turbo (mucho más rápido que image crate).
 type ThumbResult = (i64, Vec<u8>);
 
-/// Ordered list of comic IDs — same order as WrapBox children.
+static PAGE_LOAD_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(1));
+
+/// Ordered list of comic IDs — same order as FlowBox children.
 /// Used to map "selected" CSS cards back to their comic IDs.
 type ComicIdRegistry = Rc<RefCell<Vec<i64>>>;
 
@@ -116,13 +118,15 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         .hexpand(true)
         .build();
 
-    // WrapBox: cada card tiene su width_request fijo, WrapBox las distribuye
-    // automáticamente en filas según el espacio disponible — sin límite artificial
-    // de columnas ni homogeneous forzado.
-    let wrap_box = adw::WrapBox::builder()
+    // FlowBox mantiene una grilla uniforme y calcula las columnas disponibles.
+    let wrap_box = gtk::FlowBox::builder()
         .valign(gtk::Align::Start)
-        .child_spacing(8)
-        .line_spacing(8)
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .column_spacing(12)
+        .row_spacing(12)
+        .min_children_per_line(1)
+        .max_children_per_line(32)
         .margin_top(8)
         .margin_bottom(8)
         .margin_start(8)
@@ -239,6 +243,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     let offset: Rc<Cell<i64>> = Rc::new(Cell::new(0));
     let generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
     let loading: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let loading_generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
     let all_loaded: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let page_size: Rc<Cell<i64>> = Rc::new(Cell::new(200));
     let last_clicked: Rc<Cell<i32>> = Rc::new(Cell::new(-1));
@@ -327,9 +332,10 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         let stack = stack.clone();
         let thumb_widgets_r = thumb_widgets.clone();
         let thumb_tx_r = thumb_tx.clone();
-        let (off, load, done, ps, lc, gen_state) = (
+        let (off, load, load_gen, done, ps, lc, gen_state) = (
             offset.clone(),
             loading.clone(),
+            loading_generation.clone(),
             all_loaded.clone(),
             page_size.clone(),
             last_clicked.clone(),
@@ -364,6 +370,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
                 &pool,
                 &off,
                 &load,
+                &load_gen,
                 &done,
                 &ps,
                 &thumb_widgets_r,
@@ -390,25 +397,38 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
             r1();
         });
 
+        // "Solo clasificados" y "Solo sin clasificar" son mutuamente excluyentes.
+        // Al activar uno se desactiva el otro (su handler se dispara, pero solo
+        // limpia el filtro si todavía le pertenece, así que no pisa el nuevo valor).
         let r2 = refresh_c1.clone();
+        let other_unclassified = check_unclassified.clone();
         check_classified.connect_toggled(move |btn| {
-            fs2.borrow_mut().clasificado = if btn.is_active() { Some(true) } else { None };
+            if btn.is_active() {
+                fs2.borrow_mut().clasificado = Some(true);
+                other_unclassified.set_active(false);
+            } else if fs2.borrow().clasificado == Some(true) {
+                fs2.borrow_mut().clasificado = None;
+            }
             r2();
         });
 
         let r3 = refresh_c1.clone();
+        let other_classified = check_classified.clone();
         check_unclassified.connect_toggled(move |btn| {
             if btn.is_active() {
                 fs3.borrow_mut().clasificado = Some(false);
-            } else if fs3.borrow_mut().clasificado == Some(false) {
+                other_classified.set_active(false);
+            } else if fs3.borrow().clasificado == Some(false) {
                 fs3.borrow_mut().clasificado = None;
             }
             r3();
         });
 
+        // Calidad 0 = sin filtro
         let r4 = refresh_c1.clone();
         scale_quality.connect_value_changed(move |s| {
-            fs4.borrow_mut().min_calidad = Some(s.value() as i32);
+            let v = s.value().round() as i32;
+            fs4.borrow_mut().min_calidad = if v > 0 { Some(v) } else { None };
             r4();
         });
 
@@ -428,9 +448,10 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     {
         let adj = scrolled.vadjustment();
         let (wb_s, stack_s, pool_s) = (wrap_box.clone(), stack.clone(), pool.clone());
-        let (off_s, load_s, done_s, ps_s, lc_s, gen_s) = (
+        let (off_s, load_s, load_gen_s, done_s, ps_s, lc_s, gen_s) = (
             offset.clone(),
             loading.clone(),
+            loading_generation.clone(),
             all_loaded.clone(),
             page_size.clone(),
             last_clicked.clone(),
@@ -448,7 +469,11 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
             if load_s.get() || done_s.get() {
                 return;
             }
-            if adj.value() + adj.page_size() >= adj.upper() - 2500.0 {
+            let v = adj.value();
+            let page_size = adj.page_size();
+            let upper = adj.upper();
+
+            if upper > page_size && v + page_size >= upper - 2500.0 {
                 let filter = fs_s.borrow().clone();
                 let current_gen = gen_s.get();
                 cargar_pagina(
@@ -457,6 +482,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
                     &pool_s,
                     &off_s,
                     &load_s,
+                    &load_gen_s,
                     &done_s,
                     &ps_s,
                     &tw_s,
@@ -483,6 +509,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         &pool,
         &offset,
         &loading,
+        &loading_generation,
         &all_loaded,
         &page_size,
         &thumb_widgets,
@@ -510,12 +537,12 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 fn start_thumbnail_consumer(
     widgets: ThumbWidgets,
     rx: mpsc::Receiver<ThumbResult>,
-    weak_box: glib::WeakRef<adw::WrapBox>,
+    weak_box: glib::WeakRef<gtk::FlowBox>,
 ) {
     let rx = Rc::new(RefCell::new(rx));
     const MAX_PER_TICK: usize = 8;
 
-    glib::timeout_add_local(Duration::from_millis(16), move || {
+    glib::timeout_add_local(Duration::from_millis(100), move || {
         if weak_box.upgrade().is_none() {
             return glib::ControlFlow::Break;
         }
@@ -557,7 +584,8 @@ fn start_thumbnail_consumer(
 
 /// Máximo de generaciones on-demand simultáneas.
 /// Evita saturar el disco cuando muchos comics son visibles a la vez.
-static THUMB_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
+// 4 lecturas concurrentes es óptimo para HDD giratorio; 8 degrada el seek time.
+static THUMB_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
 
 /// Lanza una tokio task que asegura que el thumbnail exista.
 /// Si no existe, lo genera inmediatamente (Prioridad UI).
@@ -591,11 +619,12 @@ fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size
 
 #[allow(clippy::too_many_arguments)]
 fn cargar_pagina(
-    flow: &adw::WrapBox,
+    flow: &gtk::FlowBox,
     stack: &gtk::Stack,
     pool: &SqlitePool,
     offset: &Rc<Cell<i64>>,
     loading: &Rc<Cell<bool>>,
+    loading_generation: &Rc<Cell<u64>>,
     all_loaded: &Rc<Cell<bool>>,
     page_size: &Rc<Cell<i64>>,
     thumb_widgets: &ThumbWidgets,
@@ -615,6 +644,8 @@ fn cargar_pagina(
         return;
     }
     loading.set(true);
+    let loading_token = loading_generation.get() + 1;
+    loading_generation.set(loading_token);
 
     if is_first {
         stack.set_visible_child_name("loading");
@@ -623,10 +654,11 @@ fn cargar_pagina(
     let current_offset = offset.get();
     let current_page_size = page_size.get();
     let pool_task = pool.clone();
-    let flow_done: adw::WrapBox = flow.clone();
+    let flow_done: gtk::FlowBox = flow.clone();
     let stack_done = stack.clone();
     let offset_done = offset.clone();
     let loading_done = loading.clone();
+    let loading_generation_done = loading_generation.clone();
     let all_done = all_loaded.clone();
     let ps_done = page_size.clone();
     let tw_done = thumb_widgets.clone();
@@ -644,6 +676,7 @@ fn cargar_pagina(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
+            let _permit = PAGE_LOAD_SEM.acquire().await.ok();
             let setup = SetupRepository::new(&pool_task)
                 .get()
                 .await
@@ -672,10 +705,11 @@ fn cargar_pagina(
             (comics, limit, card_size, total)
         },
         move |(comics, limit, card_size, total)| {
-            loading_done.set(false);
-
             // Si la búsqueda ya no es la actual, ignoramos resultados
             if gen_check.get() != current_gen {
+                if loading_generation_done.get() == loading_token {
+                    loading_done.set(false);
+                }
                 return;
             }
 
@@ -683,6 +717,9 @@ fn cargar_pagina(
             let received = comics.len() as i64;
 
             if is_first && received == 0 {
+                if loading_generation_done.get() == loading_token {
+                    loading_done.set(false);
+                }
                 stack_done.set_visible_child_name("empty");
                 total_count_done.set(0);
                 on_update_done();
@@ -713,6 +750,9 @@ fn cargar_pagina(
             glib::timeout_add_local(Duration::from_millis(8), move || {
                 // Volver a comprobar en cada lote por si el usuario cambió de búsqueda mientras
                 if gen_check.get() != current_gen {
+                    if loading_generation_done.get() == loading_token {
+                        loading_done.set(false);
+                    }
                     return glib::ControlFlow::Break;
                 }
 
@@ -734,19 +774,24 @@ fn cargar_pagina(
                     flow_done.append(&card);
                     registry_done.borrow_mut().push(comic.id_comicbook);
 
-                    tw_done
-                        .borrow_mut()
-                        .insert(comic.id_comicbook, (comic.numero.clone(), img_weak));
-                    schedule_thumbnail(
-                        comic.id_comicbook,
-                        comic.path.clone(),
-                        ttx_done.clone(),
-                        card_size,
-                    );
+                    if comic.error_ultimo_escaneo.is_none() {
+                        tw_done
+                            .borrow_mut()
+                            .insert(comic.id_comicbook, (comic.numero.clone(), img_weak));
+                        schedule_thumbnail(
+                            comic.id_comicbook,
+                            comic.path.clone(),
+                            ttx_done.clone(),
+                            card_size,
+                        );
+                    }
                 }
 
                 *idx.borrow_mut() = end;
                 if end >= comics.len() {
+                    if loading_generation_done.get() == loading_token {
+                        loading_done.set(false);
+                    }
                     glib::ControlFlow::Break
                 } else {
                     glib::ControlFlow::Continue
@@ -763,7 +808,7 @@ fn cargar_pagina(
 /// La selección se marca con la clase CSS "selected" en cada card.
 fn adjuntar_gesto_seleccion(
     card: &gtk::Widget,
-    wrap_box: &adw::WrapBox,
+    wrap_box: &gtk::FlowBox,
     last_clicked: &Rc<Cell<i32>>,
     comic_id: i64,
     pool: SqlitePool,
@@ -872,11 +917,11 @@ fn adjuntar_gesto_seleccion(
     card.add_controller(gesture);
 }
 
-fn contar_seleccionados(wb: &adw::WrapBox) -> usize {
+fn contar_seleccionados(wb: &gtk::FlowBox) -> usize {
     let mut n = 0usize;
     let mut child = wb.first_child();
     while let Some(c) = child {
-        if c.has_css_class("selected") {
+        if flow_box_card(&c).is_some_and(|card| card.has_css_class("selected")) {
             n += 1;
         }
         child = c.next_sibling();
@@ -884,37 +929,44 @@ fn contar_seleccionados(wb: &adw::WrapBox) -> usize {
     n
 }
 
-fn wb_child_index(wb: &adw::WrapBox, target: &gtk::Widget) -> i32 {
+fn wb_child_index(_wb: &gtk::FlowBox, target: &gtk::Widget) -> i32 {
+    target
+        .parent()
+        .and_then(|p| p.downcast::<gtk::FlowBoxChild>().ok())
+        .map(|child| child.index())
+        .unwrap_or(-1)
+}
+
+fn wb_deselect_all(wb: &gtk::FlowBox) {
     let mut child = wb.first_child();
-    let mut i = 0i32;
     while let Some(c) = child {
-        if &c == target {
-            return i;
+        if let Some(card) = flow_box_card(&c) {
+            card.remove_css_class("selected");
         }
         child = c.next_sibling();
-        i += 1;
-    }
-    -1
-}
-
-fn wb_deselect_all(wb: &adw::WrapBox) {
-    let mut child = wb.first_child();
-    while let Some(c) = child {
-        c.remove_css_class("selected");
-        child = c.next_sibling();
     }
 }
 
-fn wb_select_range(wb: &adw::WrapBox, from: i32, to: i32) {
+fn wb_select_range(wb: &gtk::FlowBox, from: i32, to: i32) {
     let mut child = wb.first_child();
     let mut i = 0i32;
     while let Some(c) = child {
         if i >= from && i <= to {
-            c.add_css_class("selected");
+            if let Some(card) = flow_box_card(&c) {
+                card.add_css_class("selected");
+            }
         }
         child = c.next_sibling();
         i += 1;
     }
+}
+
+fn flow_box_card(child: &gtk::Widget) -> Option<gtk::Widget> {
+    child
+        .clone()
+        .downcast::<gtk::FlowBoxChild>()
+        .ok()
+        .and_then(|wrapper| wrapper.child())
 }
 
 // ---------------------------------------------------------------------------
@@ -928,20 +980,21 @@ fn build_card(
 ) -> (gtk::Widget, glib::WeakRef<gtk::Box>) {
     let (cw, ch) = card_size.dims();
 
-    // La card ya no tiene ancho fijo. Se adapta a su contenido.
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(0)
+        .width_request(cw as i32)
         .margin_top(4)
         .margin_bottom(4)
         .focusable(true)
         .halign(gtk::Align::Center)
         .hexpand(false)
-        .css_classes(["card"])
+        .css_classes(["comic-card"])
         .build();
 
-    // Contenedor con ALTURA FIJA, pero ancho flexible.
+    // El contenedor conserva exactamente el tamaño elegido para la portada.
     let image_container = gtk::Box::builder()
+        .width_request(cw as i32)
         .height_request(ch as i32)
         .halign(gtk::Align::Center)
         .hexpand(false)
@@ -953,6 +1006,7 @@ fn build_card(
     let img = gtk::Image::builder()
         .icon_name("image-x-generic-symbolic")
         .pixel_size((cw / 3) as i32)
+        .width_request(cw as i32)
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .build();

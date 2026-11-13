@@ -184,8 +184,9 @@ impl ComicVineClient {
         self.wait_for_rate_limit().await;
 
         let url = self.build_url(endpoint, &params);
+        let safe_url = url.replace(self.api_key.as_str(), "***");
         // Siempre visible en info para poder depurar fácilmente
-        tracing::info!("ComicVine → {}", url);
+        tracing::info!("ComicVine → {}", safe_url);
 
         let response = match self.client.get(&url).send().await {
             Ok(r) => r,
@@ -202,14 +203,19 @@ impl ComicVineClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<sin cuerpo>".into());
-            tracing::error!("ComicVine error HTTP {} para {}: {}", status, url, body);
+            tracing::error!(
+                "ComicVine error HTTP {} para {}: {}",
+                status,
+                safe_url,
+                body
+            );
             return None;
         }
 
         let json = match response.json::<Value>().await {
             Ok(j) => j,
             Err(e) => {
-                tracing::error!("ComicVine JSON inválido desde {}: {}", url, e);
+                tracing::error!("ComicVine JSON inválido desde {}: {}", safe_url, e);
                 return None;
             }
         };
@@ -217,7 +223,7 @@ impl ComicVineClient {
         // Comprobar el campo "error" de la respuesta de Comic Vine
         if let Some(api_err) = json.get("error").and_then(|e| e.as_str()) {
             if api_err != "OK" {
-                tracing::error!("ComicVine API error '{}' para {}", api_err, url);
+                tracing::error!("ComicVine API error '{}' para {}", api_err, safe_url);
                 return None;
             }
         }
@@ -332,6 +338,20 @@ impl ComicVineClient {
         }
 
         all.iter().filter_map(CvVolumeResult::from_value).collect()
+    }
+
+    /// Búsqueda interactiva acotada para interfaces de usuario.
+    /// Evita paginar el catálogo completo cuando el término es muy amplio.
+    pub async fn search_volumes(&self, query: &str, limit: usize) -> Vec<CvVolumeResult> {
+        let filter = build_filter(&[Some(format!("name:{}", sanitize_query(query)))]);
+        let params = page_params(limit.clamp(1, API_RESULTS_LIMIT), 0, &filter);
+        self.make_request("volumes/", params)
+            .await
+            .and_then(|data| data["results"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(CvVolumeResult::from_value)
+            .collect()
     }
 
     pub async fn get_volume_details(&self, volume_id: &str) -> Option<Value> {

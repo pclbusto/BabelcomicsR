@@ -106,15 +106,20 @@ impl<'a> ComicbookRepository<'a> {
                 cb.catalog_match_similarity,
                 cb.catalog_best_similarity,
                 cb.catalog_selected_rank,
-                cb.catalog_match_method
+                cb.catalog_match_method,
+                COALESCE(rp.total_pages, 0),
+                COALESCE(rp.visited_pages_count, 0),
+                rp.last_page_index,
+                rp.completed_at
                FROM comicbooks cb
                LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
                LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
+               LEFT JOIN comicbook_reading_progress rp ON cb.id_comicbook = rp.comicbook_id
                WHERE (? = 1 OR cb.en_papelera = 0)
                  {search_sql}
                  AND (? IS NULL OR (ci.id_comicbook_info IS NOT NULL) = ?)
-                 AND (? IS NULL OR CAST(cb.calidad AS INTEGER) >= ?)
+                 AND (? IS NULL OR CAST(COALESCE(cb.calidad, 0) AS INTEGER) >= ?)
                ORDER BY COALESCE(ci.titulo, cb.path) COLLATE NOCASE
                LIMIT ? OFFSET ?"#
         );
@@ -152,6 +157,10 @@ impl<'a> ComicbookRepository<'a> {
                 catalog_best_similarity: r.get(13),
                 catalog_selected_rank: r.get(14),
                 catalog_match_method: r.get(15),
+                reading_total_pages: r.get(16),
+                reading_visited_pages: r.get(17),
+                reading_last_page_index: r.get(18),
+                reading_completed_at: r.get(19),
             })
             .collect())
     }
@@ -178,11 +187,16 @@ impl<'a> ComicbookRepository<'a> {
                 cb.catalog_match_similarity,
                 cb.catalog_best_similarity,
                 cb.catalog_selected_rank,
-                cb.catalog_match_method
+                cb.catalog_match_method,
+                COALESCE(rp.total_pages, 0),
+                COALESCE(rp.visited_pages_count, 0),
+                rp.last_page_index,
+                rp.completed_at
                FROM comicbooks cb
                LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
                LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
+               LEFT JOIN comicbook_reading_progress rp ON cb.id_comicbook = rp.comicbook_id
                WHERE cb.id_comicbook = ?"#,
         )
         .bind(id)
@@ -206,6 +220,10 @@ impl<'a> ComicbookRepository<'a> {
             catalog_best_similarity: r.get(13),
             catalog_selected_rank: r.get(14),
             catalog_match_method: r.get(15),
+            reading_total_pages: r.get(16),
+            reading_visited_pages: r.get(17),
+            reading_last_page_index: r.get(18),
+            reading_completed_at: r.get(19),
         }))
     }
 
@@ -231,11 +249,16 @@ impl<'a> ComicbookRepository<'a> {
                 cb.catalog_match_similarity,
                 cb.catalog_best_similarity,
                 cb.catalog_selected_rank,
-                cb.catalog_match_method
+                cb.catalog_match_method,
+                COALESCE(rp.total_pages, 0),
+                COALESCE(rp.visited_pages_count, 0),
+                rp.last_page_index,
+                rp.completed_at
                FROM comicbooks cb
                LEFT JOIN comicbooks_info ci ON cb.id_comicbook_info = ci.id_comicbook_info
                LEFT JOIN volumens v          ON ci.id_volume = v.id_volume
                LEFT JOIN publishers p       ON v.id_publisher = p.id_publisher
+               LEFT JOIN comicbook_reading_progress rp ON cb.id_comicbook = rp.comicbook_id
                WHERE (? = 1 OR cb.en_papelera = 0)
                ORDER BY COALESCE(ci.titulo, cb.path) COLLATE NOCASE"#,
         )
@@ -262,6 +285,10 @@ impl<'a> ComicbookRepository<'a> {
                 catalog_best_similarity: r.get(13),
                 catalog_selected_rank: r.get(14),
                 catalog_match_method: r.get(15),
+                reading_total_pages: r.get(16),
+                reading_visited_pages: r.get(17),
+                reading_last_page_index: r.get(18),
+                reading_completed_at: r.get(19),
             })
             .collect();
         Ok(views)
@@ -526,7 +553,7 @@ impl<'a> ComicbookRepository<'a> {
                WHERE cb.en_papelera = 0
                  {search_sql}
                  AND (? IS NULL OR (ci.id_comicbook_info IS NOT NULL) = ?)
-                 AND (? IS NULL OR CAST(cb.calidad AS INTEGER) >= ?)"#
+                 AND (? IS NULL OR CAST(COALESCE(cb.calidad, 0) AS INTEGER) >= ?)"#
         );
 
         let mut q = sqlx::query(&sql);

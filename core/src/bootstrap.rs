@@ -1,9 +1,15 @@
 use anyhow::Result;
-use babelcomics::app;
-use babelcomics_core::{db, helpers, repositories};
+use sqlx::SqlitePool;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+use crate::{db, helpers, repositories};
+
+pub struct AppContext {
+    pub pool: SqlitePool,
+    pub thumbnails_base: Option<String>,
+}
+
+pub async fn init() -> Result<AppContext> {
+    // Configurar Tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -16,13 +22,24 @@ async fn main() -> Result<()> {
 
     let pool = db::create_pool(&db_path).await?;
 
-    // Configurar Rayon para reservar 2 núcleos para la UI/Tareas inmediatas
+    // Configurar Rayon con un límite conservador.
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let rayon_threads = (cores as i32 - 2).max(1) as usize;
+    let rayon_threads = 1;
     tracing::info!(
-        "Configurando Rayon con {} hilos (reservando 2 para UI)",
+        "Configurando Rayon con {} hilos ({} cores detectados)",
+        rayon_threads,
+        cores
+    );
+    if rayon_threads < cores {
+        tracing::info!(
+            "Rayon limitado para mantener responsividad ({} cores reservados)",
+            cores - rayon_threads
+        );
+    }
+    tracing::debug!(
+        "Rayon threadpool global inicializado con {} hilos",
         rayon_threads
     );
 
@@ -32,16 +49,15 @@ async fn main() -> Result<()> {
 
     // Inicializar el directorio de thumbnails desde la configuración guardada
     let setup = repositories::SetupRepository::new(&pool).get().await?;
-    helpers::paths::initialize_thumbnails_base(setup.carpeta_thumbnails);
+    helpers::paths::initialize_thumbnails_base(setup.carpeta_thumbnails.clone());
 
-    // Arrancar la UI (bloqueante hasta que se cierre la ventana)
-    app::run(pool);
-
-    // Salida limpia
-    std::process::exit(0);
+    Ok(AppContext {
+        pool,
+        thumbnails_base: setup.carpeta_thumbnails,
+    })
 }
 
-fn get_db_path() -> String {
+pub fn get_db_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     format!("{}/.local/share/babelcomics/babelcomics.db", home)
 }

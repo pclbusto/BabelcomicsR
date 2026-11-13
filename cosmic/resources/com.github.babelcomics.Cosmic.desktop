@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Babelcomics COSMIC
+Comment=Organiza y cataloga tu biblioteca de cómics
+Exec=babelcomics-cosmic
+Icon=accessories-text-editor
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;Utility;
+Keywords=comics;cbz;cbr;biblioteca;
+StartupNotify=true
+StartupWMClass=com.github.babelcomics.Cosmic

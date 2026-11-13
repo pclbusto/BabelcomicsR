@@ -12,10 +12,10 @@ pub struct ImportReport {
 }
 
 /// Importa una editorial completa desde Comic Vine:
-/// 1. Obtiene los detalles del publisher (nombre, descripción, logo, colección de volúmenes).
+/// 1. Obtiene los detalles del publisher (nombre, descripción, logo y colección de volúmenes).
 /// 2. Inserta o actualiza el publisher en la tabla `publishers`.
-/// 3. Inserta todos los volúmenes asociados como stubs (local = 1) usando INSERT OR IGNORE
-///    para no duplicar los que ya existan.
+/// 3. Inserta todos los volúmenes asociados como stubs (local = 1), sin duplicar los que ya
+///    existan.
 ///
 /// Todo el paso 3 se ejecuta dentro de una sola transacción para máxima eficiencia.
 pub async fn import_publisher_from_cv(
@@ -69,32 +69,32 @@ pub async fn import_publisher_from_cv(
     .await?;
 
     // ── 3. Importar volúmenes asociados ───────────────────────────────────────
+    // El detalle de publisher contiene su colección completa en `volumes`. El endpoint
+    // `/volumes` ignora el filtro `publisher`, por lo que usarlo aquí importaría el catálogo
+    // global de ComicVine en lugar de los volúmenes de la editorial seleccionada.
     let volumes_arr = details["volumes"].as_array().cloned().unwrap_or_default();
-
     let total = volumes_arr.len();
     let mut inserted = 0usize;
 
     // Toda la inserción en bloque dentro de una transacción
     let mut tx = pool.begin().await?;
 
-    for vol in &volumes_arr {
-        let vol_cv_id = match vol["id"].as_i64() {
-            Some(id) => id,
-            None => continue,
+    for volume in &volumes_arr {
+        let Some(volume_cv_id) = volume["id"].as_i64() else {
+            continue;
         };
-        let vol_name = vol["name"].as_str().unwrap_or("Sin nombre");
-        let api_detail_url = vol["api_detail_url"].as_str().unwrap_or("");
-
+        let volume_name = volume["name"].as_str().unwrap_or("Sin nombre");
+        let api_detail_url = volume["api_detail_url"].as_str().unwrap_or("");
         let affected = sqlx::query(
             r#"INSERT OR IGNORE INTO volumens
                    (nombre, deck, descripcion, url, id_publisher,
                     anio_inicio, cantidad_numeros, id_comicvine, image_url, local)
                VALUES (?, '', '', ?, ?, 0, 0, ?, '', 1)"#,
         )
-        .bind(vol_name)
+        .bind(volume_name)
         .bind(api_detail_url)
         .bind(publisher_local_id)
-        .bind(vol_cv_id)
+        .bind(volume_cv_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();

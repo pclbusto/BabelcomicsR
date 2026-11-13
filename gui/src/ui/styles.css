@@ -3,10 +3,16 @@
     padding: 8px;
     transition: all 200ms ease;
     background-color: transparent;
+    border: 2px solid transparent;
 }
 
 .comic-card:hover {
     background-color: rgba(255, 255, 255, 0.05);
+}
+
+.comic-card.selected {
+    background-color: rgba(53, 132, 228, 0.15);
+    border-color: #3584e4;
 }
 
 .comic-cover-container {
@@ -65,22 +71,6 @@
     /* Shadow and padding handled in container or here if needed */
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     border-radius: 8px;
-}
-
-.card {
-    border-radius: 8px;
-    background-color: transparent;
-    transition: all 200ms ease;
-    border: 2px solid transparent;
-}
-
-.card:hover {
-    background-color: rgba(255, 255, 255, 0.05);
-}
-
-.card.selected {
-    background-color: rgba(53, 132, 228, 0.15);
-    border-color: #3584e4;
 }
 
 .missing-comic {

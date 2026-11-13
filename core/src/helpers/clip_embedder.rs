@@ -21,8 +21,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::clip;
-use lazy_static::lazy_static;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Dimensión del embedding visual de CLIP ViT-B/32.
 pub const EMBEDDING_DIM: usize = 512;
@@ -41,9 +40,10 @@ const STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 // Modelo singleton (carga perezosa, protegido por Mutex)
 // ---------------------------------------------------------------------------
 
-lazy_static! {
-    static ref EMBEDDER: Mutex<Option<ClipEmbedder>> = Mutex::new(None);
-}
+// OnceLock para el modelo ya inicializado (sin mutex durante inferencia).
+// Mutex solo durante la inicialización única para evitar doble carga.
+static EMBEDDER: OnceLock<ClipEmbedder> = OnceLock::new();
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Calcula el embedding CLIP de una imagen.
 ///
@@ -53,16 +53,24 @@ lazy_static! {
 ///
 /// Devuelve un vector L2-normalizado de 512 componentes.
 pub fn embed_image(img_bytes: &[u8]) -> Result<Vec<f32>> {
-    let mut guard = EMBEDDER.lock().unwrap();
-    if guard.is_none() {
-        *guard = Some(ClipEmbedder::load()?);
-    }
-    guard.as_ref().unwrap().embed(img_bytes)
+    let embedder = if let Some(e) = EMBEDDER.get() {
+        e
+    } else {
+        // Serializa la inicialización única; una vez que OnceLock tiene valor,
+        // este path no se vuelve a tomar y el mutex nunca se contesta.
+        let _guard = INIT_LOCK.lock().unwrap();
+        if EMBEDDER.get().is_none() {
+            let model = ClipEmbedder::load()?;
+            let _ = EMBEDDER.set(model);
+        }
+        EMBEDDER.get().unwrap()
+    };
+    embedder.embed(img_bytes)
 }
 
 /// Verifica si el modelo CLIP ya está cargado en memoria (sin descargarlo).
 pub fn is_model_loaded() -> bool {
-    EMBEDDER.lock().unwrap().is_some()
+    EMBEDDER.get().is_some()
 }
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,17 @@
 use std::cell::{Cell, RefCell};
+use std::future::Future;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 
-use crate::ui::run_in_background;
 use babelcomics_core::helpers::suggestion_service::UnifiedSuggestion;
 use babelcomics_core::helpers::thumbnail::CardSize;
 use babelcomics_core::models::ComicbookView;
@@ -24,6 +28,20 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
     let selected_match_idx: Rc<Cell<usize>> = Rc::new(Cell::new(0));
     // Incremented each time we switch comic — stale callbacks check this
     let search_gen: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_handles: Rc<RefCell<Vec<tokio::task::JoinHandle<()>>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let row_task_handles: Rc<RefCell<Vec<tokio::task::JoinHandle<()>>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let row_selection_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let task_scope = CatalogTaskScope {
+        cancelled: cancelled.clone(),
+        handles: task_handles.clone(),
+    };
+    let row_task_scope = CatalogTaskScope {
+        cancelled: cancelled.clone(),
+        handles: row_task_handles.clone(),
+    };
 
     // Caché de sugerencias pre-calculadas (Thread-safe)
     let suggestions_cache: Arc<Mutex<std::collections::HashMap<i64, Vec<UnifiedSuggestion>>>> =
@@ -33,9 +51,6 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
     // Key: (id_comicbook_info, target_height)
     let pixbuf_cache: Arc<Mutex<std::collections::HashMap<(i64, i32), gdk_pixbuf::Pixbuf>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
-
-    // Lista de IDs pendientes de procesar
-    let pending_ids: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(comic_ids.clone()));
 
     // ── Toolbar ───────────────────────────────────────────────────────────────
     let toolbar = adw::ToolbarView::new();
@@ -76,6 +91,29 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
     let skip_btn = gtk::Button::builder().label("Omitir").build();
     header.pack_end(&skip_btn);
     toolbar.add_top_bar(&header);
+
+    {
+        let cancelled = cancelled.clone();
+        let task_handles = task_handles.clone();
+        let row_task_handles = row_task_handles.clone();
+        let row_selection_debounce = row_selection_debounce.clone();
+        toolbar.connect_destroy(move |_| {
+            cancelled.store(true, Ordering::Relaxed);
+            if let Some(source_id) = row_selection_debounce.borrow_mut().take() {
+                source_id.remove();
+            }
+            tracing::debug!(
+                pending_tasks = task_handles.borrow().len() + row_task_handles.borrow().len(),
+                "Catalogación inteligente destruida; abortando tareas pendientes"
+            );
+            for handle in task_handles.borrow_mut().drain(..) {
+                handle.abort();
+            }
+            for handle in row_task_handles.borrow_mut().drain(..) {
+                handle.abort();
+            }
+        });
+    }
 
     let paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -175,9 +213,19 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         let pool = pool.clone();
         let cache = suggestions_cache.clone();
         let p_cache = pixbuf_cache.clone();
+        let row_task_scope = row_task_scope.clone();
+        let row_task_handles = row_task_handles.clone();
+        let row_selection_debounce = row_selection_debounce.clone();
 
         left_list.connect_row_selected(move |_, row_opt| {
             let Some(row) = row_opt else { return };
+            for handle in row_task_handles.borrow_mut().drain(..) {
+                handle.abort();
+            }
+            if let Some(source_id) = row_selection_debounce.borrow_mut().take() {
+                source_id.remove();
+            }
+
             let idx = row.index() as usize;
             current_idx.set(idx);
             selected_match_idx.set(0);
@@ -199,89 +247,120 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
 
             clear_box(&left_cover);
             append_placeholder(&left_cover, 64);
-            load_comic_cover_async(comic_id, left_cover.clone());
 
             let generation = search_gen.get() + 1;
             search_gen.set(generation);
 
-            // Consultar Caché
-            let cached = { cache.lock().unwrap().get(&comic_id).cloned() };
-            if let Some(c_matches) = cached {
-                *matches.borrow_mut() = c_matches.clone();
-                populate_right_column(
-                    &c_matches,
-                    0,
-                    &right_cover,
-                    &right_info,
-                    &candidates_box,
-                    &apply_btn,
-                    matches.clone(),
-                    selected_match_idx.clone(),
-                    p_cache.clone(),
-                );
-                return;
-            }
-
             clear_box(&right_cover);
-            right_cover.append(
-                &adw::Spinner::builder()
-                    .halign(gtk::Align::Center)
-                    .valign(gtk::Align::Center)
-                    .build(),
-            );
-            right_info.set_label("Buscando coincidencias…");
+            append_placeholder(&right_cover, 64);
+            right_info.set_label("Seleccionando...");
             clear_box(&candidates_box);
 
             let p = pool.clone();
             let m_ui = matches.clone();
             let smi = selected_match_idx.clone();
             let s_gen = search_gen.clone();
+            let l_cov = left_cover.clone();
             let r_cov = right_cover.clone();
             let r_inf = right_info.clone();
             let c_box = candidates_box.clone();
             let a_btn = apply_btn.clone();
             let cache_cb = cache.clone();
             let pc_cb = p_cache.clone();
+            let row_task_scope_done = row_task_scope.clone();
+            let row_task_scope_spawn = row_task_scope.clone();
+            let debounce_state = row_selection_debounce.clone();
 
-            run_in_background(
-                tokio::runtime::Handle::current(),
-                async move {
-                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(
-                        &p, comic_id, 10,
-                    )
-                    .await
-                },
-                move |result| {
-                    if s_gen.get() != generation {
-                        return;
-                    }
-                    match result {
-                        Ok(new_matches) => {
-                            cache_cb
-                                .lock()
-                                .unwrap()
-                                .insert(comic_id, new_matches.clone());
-                            *m_ui.borrow_mut() = new_matches.clone();
-                            populate_right_column(
-                                &new_matches,
-                                0,
-                                &r_cov,
-                                &r_inf,
-                                &c_box,
-                                &a_btn,
-                                m_ui,
-                                smi,
-                                pc_cb,
-                            );
+            let source_id = glib::timeout_add_local(Duration::from_millis(1500), move || {
+                debounce_state.borrow_mut().take();
+                if s_gen.get() != generation {
+                    return glib::ControlFlow::Break;
+                }
+
+                load_comic_cover_async(comic_id, l_cov.clone(), row_task_scope_spawn.clone());
+
+                if let Some(cached_matches) = cache_cb.lock().unwrap().get(&comic_id).cloned() {
+                    *m_ui.borrow_mut() = cached_matches.clone();
+                    populate_right_column(
+                        &cached_matches,
+                        0,
+                        &r_cov,
+                        &r_inf,
+                        &c_box,
+                        &a_btn,
+                        m_ui.clone(),
+                        smi.clone(),
+                        pc_cb.clone(),
+                        row_task_scope_done.clone(),
+                    );
+                    return glib::ControlFlow::Break;
+                }
+
+                clear_box(&r_cov);
+                r_cov.append(
+                    &adw::Spinner::builder()
+                        .halign(gtk::Align::Center)
+                        .valign(gtk::Align::Center)
+                        .build(),
+                );
+                r_inf.set_label("Buscando coincidencias...");
+
+                let s_gen_done = s_gen.clone();
+                let r_cov_done = r_cov.clone();
+                let r_inf_done = r_inf.clone();
+                let c_box_done = c_box.clone();
+                let a_btn_done = a_btn.clone();
+                let m_ui_done = m_ui.clone();
+                let smi_done = smi.clone();
+                let pc_cb_done = pc_cb.clone();
+                let cache_done = cache_cb.clone();
+                let row_task_scope_done_cb = row_task_scope_done.clone();
+                let p_task = p.clone();
+
+                row_task_scope_spawn.spawn(
+                    tokio::runtime::Handle::current(),
+                    async move {
+                        babelcomics_core::helpers::suggestion_service::suggest_best_matches(
+                            &p_task, comic_id, 10,
+                        )
+                        .await
+                    },
+                    move |result| {
+                        if s_gen_done.get() != generation {
+                            return;
                         }
-                        Err(e) => {
-                            clear_box(&r_cov);
-                            append_placeholder(&r_cov, 64);
-                            r_inf.set_label(&format!("Error: {e}"));
+                        match result {
+                            Ok(new_matches) => {
+                                cache_done
+                                    .lock()
+                                    .unwrap()
+                                    .insert(comic_id, new_matches.clone());
+                                *m_ui_done.borrow_mut() = new_matches.clone();
+                                populate_right_column(
+                                    &new_matches,
+                                    0,
+                                    &r_cov_done,
+                                    &r_inf_done,
+                                    &c_box_done,
+                                    &a_btn_done,
+                                    m_ui_done,
+                                    smi_done,
+                                    pc_cb_done,
+                                    row_task_scope_done_cb,
+                                );
+                            }
+                            Err(e) => {
+                                clear_box(&r_cov_done);
+                                append_placeholder(&r_cov_done, 64);
+                                r_inf_done.set_label(&format!("Error: {e}"));
+                            }
                         }
-                    }
-                },
-            );
+                    },
+                );
+
+                glib::ControlFlow::Break
+            });
+            *row_selection_debounce.borrow_mut() = Some(source_id);
         });
     }
 
@@ -291,6 +370,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         let current_idx = current_idx.clone();
         let left_list = left_list.clone();
         let pool = pool.clone();
+        let task_scope = task_scope.clone();
 
         clear_btn.connect_clicked(move |btn| {
             let idx = current_idx.get();
@@ -303,7 +383,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
             let views_done = comic_views.clone();
             let ll_done = left_list.clone();
 
-            run_in_background(
+            task_scope.spawn(
                 tokio::runtime::Handle::current(),
                 async move {
                     babelcomics_core::repositories::ComicbookRepository::new(&p)
@@ -333,36 +413,6 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         });
     }
 
-    // ── Background Prefetcher ────────────────────────────────────────────────
-    {
-        let pool_bg = pool.clone();
-        let cache_bg = suggestions_cache.clone();
-        let pending = pending_ids.clone();
-        tokio::runtime::Handle::current().spawn(async move {
-            loop {
-                let next_id = {
-                    let mut p = pending.lock().unwrap();
-                    if p.is_empty() {
-                        break;
-                    }
-                    p.remove(0)
-                };
-                if cache_bg.lock().unwrap().contains_key(&next_id) {
-                    continue;
-                }
-                if let Ok(res) =
-                    babelcomics_core::helpers::suggestion_service::suggest_best_matches(
-                        &pool_bg, next_id, 10,
-                    )
-                    .await
-                {
-                    cache_bg.lock().unwrap().insert(next_id, res);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        });
-    }
-
     // ── Skip logic ──────────────────────────────────────────────────────────
     {
         let comic_views = comic_views.clone();
@@ -388,6 +438,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         let selected_match_idx = selected_match_idx.clone();
         let left_list = left_list.clone();
         let pool = pool.clone();
+        let task_scope = task_scope.clone();
 
         apply_btn.connect_clicked(move |btn| {
             let idx = current_idx.get();
@@ -431,7 +482,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
                 let p = pool.clone();
                 let ll = left_list.clone();
                 let total = comic_views.borrow().len();
-                run_in_background(
+                task_scope.spawn(
                     tokio::runtime::Handle::current(),
                     async move {
                         babelcomics_core::repositories::ComicbookRepository::new(&p)
@@ -462,7 +513,7 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
         let p_load = pool.clone();
         let cv_init = comic_views.clone();
         let ll_init = left_list.clone();
-        run_in_background(
+        task_scope.spawn(
             tokio::runtime::Handle::current(),
             async move {
                 let repo = ComicbookRepository::new(&p_load);
@@ -491,6 +542,64 @@ pub fn build(comic_ids: Vec<i64>, pool: SqlitePool) -> gtk::Widget {
     toolbar.upcast()
 }
 
+#[derive(Clone)]
+struct CatalogTaskScope {
+    cancelled: Arc<AtomicBool>,
+    handles: Rc<RefCell<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl CatalogTaskScope {
+    fn spawn<T, F, D>(&self, rt: tokio::runtime::Handle, task: F, on_done: D)
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+        D: FnOnce(T) + 'static,
+    {
+        let handle = run_catalog_task(rt, self.cancelled.clone(), task, on_done);
+        self.handles.borrow_mut().push(handle);
+    }
+}
+
+fn run_catalog_task<T, F, D>(
+    rt: tokio::runtime::Handle,
+    cancelled: Arc<AtomicBool>,
+    task: F,
+    on_done: D,
+) -> tokio::task::JoinHandle<()>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+    D: FnOnce(T) + 'static,
+{
+    static NEXT_CATALOG_TASK_ID: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(1);
+
+    let task_id = NEXT_CATALOG_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(task_id, "catalogación inteligente: tarea iniciada");
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<T>();
+    let cancelled_for_task = cancelled.clone();
+
+    let handle = rt.spawn(async move {
+        let result = task.await;
+        tracing::debug!(task_id, "catalogación inteligente: future terminado");
+        if !cancelled_for_task.load(Ordering::Relaxed) {
+            let _ = tx.send(result);
+        }
+    });
+
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(val) = rx.await {
+            if !cancelled.load(Ordering::Relaxed) {
+                on_done(val);
+            }
+        }
+        tracing::debug!(task_id, "catalogación inteligente: callback liberada");
+    });
+
+    handle
+}
+
 fn clear_box(b: &gtk::Box) {
     while let Some(c) = b.first_child() {
         b.remove(&c);
@@ -506,10 +615,10 @@ fn append_placeholder(b: &gtk::Box, px: i32) {
     b.append(&img);
 }
 
-fn load_comic_cover_async(comic_id: i64, target: gtk::Box) {
+fn load_comic_cover_async(comic_id: i64, target: gtk::Box, task_scope: CatalogTaskScope) {
     let thumb_path =
         babelcomics_core::helpers::paths::comic_thumbnail_path(comic_id, CardSize::Large);
-    run_in_background(
+    task_scope.spawn(
         tokio::runtime::Handle::current(),
         async move { tokio::fs::read(&thumb_path).await.ok() },
         move |bytes_opt| {
@@ -542,28 +651,6 @@ fn build_list_row(view: &ComicbookView) -> gtk::ListBoxRow {
         .css_classes(["comic-cover-container"])
         .build();
     append_placeholder(&thumb_container, 24);
-
-    let id = view.id_comicbook;
-    let tc_weak = thumb_container.downgrade();
-    glib::idle_add_local_once(move || {
-        let thumb_path =
-            babelcomics_core::helpers::paths::comic_thumbnail_path(id, CardSize::Small);
-        run_in_background(
-            tokio::runtime::Handle::current(),
-            async move { tokio::fs::read(&thumb_path).await.ok() },
-            move |bytes_opt| {
-                if let (Some(bytes), Some(target)) = (bytes_opt, tc_weak.upgrade()) {
-                    let gbytes = glib::Bytes::from_owned(bytes);
-                    if let Ok(texture) = gtk::gdk::Texture::from_bytes(&gbytes) {
-                        clear_box(&target);
-                        let pic = gtk::Picture::for_paintable(&texture);
-                        pic.set_content_fit(gtk::ContentFit::Contain);
-                        target.append(&pic);
-                    }
-                }
-            },
-        );
-    });
 
     let label_text = display_title_for_view(view);
     row_box.append(&thumb_container);
@@ -615,6 +702,7 @@ fn populate_right_column(
     matches: Rc<RefCell<Vec<UnifiedSuggestion>>>,
     smi: Rc<Cell<usize>>,
     pc: Arc<Mutex<std::collections::HashMap<(i64, i32), gdk_pixbuf::Pixbuf>>>,
+    task_scope: CatalogTaskScope,
 ) {
     if new_matches.is_empty() {
         clear_box(right_cover);
@@ -623,11 +711,18 @@ fn populate_right_column(
         apply_btn.set_sensitive(false);
         return;
     }
-    show_match_in_cover(new_matches, active_idx, right_cover, right_info, pc.clone());
+    show_match_in_cover(
+        new_matches,
+        active_idx,
+        right_cover,
+        right_info,
+        pc.clone(),
+        task_scope.clone(),
+    );
     apply_btn.set_sensitive(true);
     clear_box(candidates_box);
     for (i, m) in new_matches.iter().enumerate() {
-        let thumb = build_candidate_thumb(m, i == active_idx, pc.clone());
+        let thumb = build_candidate_thumb(m, i == active_idx);
         let m_cap = matches.clone();
         let smi_cap = smi.clone();
         let r_cov = right_cover.clone();
@@ -635,12 +730,20 @@ fn populate_right_column(
         let c_box = candidates_box.clone();
         let a_btn = apply_btn.clone();
         let pc_cap = pc.clone();
+        let task_scope_cap = task_scope.clone();
         let idx = i;
         let gesture = gtk::GestureClick::new();
         gesture.connect_pressed(move |g, _, _, _| {
             smi_cap.set(idx);
             let m_vec = m_cap.borrow();
-            show_match_in_cover(&m_vec, idx, &r_cov, &r_inf, pc_cap.clone());
+            show_match_in_cover(
+                &m_vec,
+                idx,
+                &r_cov,
+                &r_inf,
+                pc_cap.clone(),
+                task_scope_cap.clone(),
+            );
             let mut child = c_box.first_child();
             let mut j = 0usize;
             while let Some(c) = child {
@@ -666,6 +769,7 @@ fn show_match_in_cover(
     right_cover: &gtk::Box,
     right_info: &gtk::Label,
     pc: Arc<Mutex<std::collections::HashMap<(i64, i32), gdk_pixbuf::Pixbuf>>>,
+    task_scope: CatalogTaskScope,
 ) {
     let Some(m) = matches.get(idx) else { return };
     let method = match m.method {
@@ -700,7 +804,7 @@ fn show_match_in_cover(
     let n_v = m.nombre_volume.clone().unwrap_or_default();
     let i_v = m.id_volume.unwrap_or(0);
     let pc_clone = pc.clone();
-    run_in_background(
+    task_scope.spawn(
         tokio::runtime::Handle::current(),
         async move {
             let bytes = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
@@ -740,11 +844,7 @@ fn show_match_in_cover(
     );
 }
 
-fn build_candidate_thumb(
-    m: &UnifiedSuggestion,
-    is_active: bool,
-    pc: Arc<Mutex<std::collections::HashMap<(i64, i32), gdk_pixbuf::Pixbuf>>>,
-) -> gtk::Box {
+fn build_candidate_thumb(m: &UnifiedSuggestion, is_active: bool) -> gtk::Box {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
@@ -760,66 +860,7 @@ fn build_candidate_thumb(
         .css_classes(["comic-cover-container"])
         .build();
 
-    let info_id = m.id_comicbook_info;
-    let target_h = THUMB_SMALL_H;
-
-    // Check cache
-    if let Some(pixbuf) = pc.lock().unwrap().get(&(info_id, target_h)).cloned() {
-        let pic = gtk::Picture::for_pixbuf(&pixbuf);
-        pic.set_content_fit(gtk::ContentFit::Contain);
-        cover_box.append(&pic);
-    } else {
-        append_placeholder(&cover_box, 24);
-        let cover_weak = cover_box.downgrade();
-        let r_c = m.ruta_cover.clone();
-        let u_o = m.url_original.clone();
-        let n_v = m.nombre_volume.clone().unwrap_or_default();
-        let i_v = m.id_volume.unwrap_or(0);
-        let pc_clone = pc.clone();
-        run_in_background(
-            tokio::runtime::Handle::current(),
-            async move {
-                let bytes = babelcomics_core::helpers::paths::read_comicbook_info_cover_bytes(
-                    r_c.as_deref(),
-                    u_o.as_deref(),
-                    &n_v,
-                    i_v,
-                )
-                .await?;
-                tokio::task::spawn_blocking(move || {
-                    babelcomics_core::helpers::thumbnail::resize_to_height_rgb(
-                        &bytes,
-                        target_h as u32,
-                    )
-                })
-                .await
-                .ok()?
-            },
-            move |pixels_opt| {
-                if let (Some((data, w, h, rs)), Some(container)) =
-                    (pixels_opt, cover_weak.upgrade())
-                {
-                    let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
-                        &glib::Bytes::from_owned(data),
-                        gdk_pixbuf::Colorspace::Rgb,
-                        false,
-                        8,
-                        w,
-                        h,
-                        rs,
-                    );
-                    pc_clone
-                        .lock()
-                        .unwrap()
-                        .insert((info_id, target_h), pixbuf.clone());
-                    clear_box(&container);
-                    let pic = gtk::Picture::for_pixbuf(&pixbuf);
-                    pic.set_content_fit(gtk::ContentFit::Contain);
-                    container.append(&pic);
-                }
-            },
-        );
-    }
+    append_placeholder(&cover_box, 24);
 
     outer.append(&cover_box);
     outer.append(

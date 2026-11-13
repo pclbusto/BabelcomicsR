@@ -1,0 +1,21 @@
+[package]
+name = "babelcomics-cosmic"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Cliente COSMIC para Babelcomics"
+
+[dependencies]
+babelcomics-core = { path = "../core" }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+open = "5.3"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "03d7dcb832bc6d15bc1bb07327a1aa426b2d5bc0"
+default-features = false
+features = ["winit", "tokio", "wgpu", "x11", "wayland", "multi-window", "a11y", "xdg-portal"]

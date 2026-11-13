@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk4::prelude::*;
@@ -64,7 +65,11 @@ pub fn build(_pool: SqlitePool) -> gtk::Widget {
         let mut rx = subscribe_jobs();
         loop {
             match rx.recv().await {
-                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {
+                    // Si hay saturación, esperamos un poco antes de refrescar todo
+                    glib::timeout_future(Duration::from_millis(100)).await;
+                }
                 Err(RecvError::Closed) => break,
             }
 

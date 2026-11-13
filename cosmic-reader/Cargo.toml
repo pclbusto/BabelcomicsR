@@ -1,0 +1,21 @@
+[package]
+name = "cosmic-reader"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone libcosmic comic reader"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+zip = "2.2.0" # Para leer CBZ
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3", features = ["formatting"] }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "03d7dcb832bc6d15bc1bb07327a1aa426b2d5bc0"
+default-features = false
+features = ["winit", "tokio", "wgpu", "x11", "wayland", "multi-window", "a11y", "xdg-portal", "about"]

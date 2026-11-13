@@ -8,6 +8,7 @@ pub mod extractor;
 pub mod organizer;
 pub mod paths;
 pub mod publisher_import_service;
+pub mod reading_progress;
 pub mod scan_service;
 pub mod scanner;
 pub mod suggestion_service;

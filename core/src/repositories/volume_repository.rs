@@ -3,7 +3,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::models::{NewVolume, Volume, parse_search_query};
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum VolumeSortOrder {
     #[default]
     NombreAsc,
@@ -12,10 +12,38 @@ pub enum VolumeSortOrder {
     AnioDesc,
     IssuesAsc,
     IssuesDesc,
+    CompletitudAsc,
+    CompletitudDesc,
 }
 
 impl VolumeSortOrder {
-    fn to_sql(self) -> &'static str {
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "nombre_desc" => Self::NombreDesc,
+            "anio_asc" => Self::AnioAsc,
+            "anio_desc" => Self::AnioDesc,
+            "issues_asc" => Self::IssuesAsc,
+            "issues_desc" => Self::IssuesDesc,
+            "completitud_asc" => Self::CompletitudAsc,
+            "completitud_desc" => Self::CompletitudDesc,
+            _ => Self::NombreAsc,
+        }
+    }
+
+    pub fn to_db(self) -> &'static str {
+        match self {
+            Self::NombreAsc => "nombre_asc",
+            Self::NombreDesc => "nombre_desc",
+            Self::AnioAsc => "anio_asc",
+            Self::AnioDesc => "anio_desc",
+            Self::IssuesAsc => "issues_asc",
+            Self::IssuesDesc => "issues_desc",
+            Self::CompletitudAsc => "completitud_asc",
+            Self::CompletitudDesc => "completitud_desc",
+        }
+    }
+
+    pub fn to_sql(self) -> &'static str {
         match self {
             Self::NombreAsc => "v.nombre COLLATE NOCASE ASC",
             Self::NombreDesc => "v.nombre COLLATE NOCASE DESC",
@@ -23,6 +51,12 @@ impl VolumeSortOrder {
             Self::AnioDesc => "v.anio_inicio DESC, v.nombre COLLATE NOCASE ASC",
             Self::IssuesAsc => "v.cantidad_numeros ASC, v.nombre COLLATE NOCASE ASC",
             Self::IssuesDesc => "v.cantidad_numeros DESC, v.nombre COLLATE NOCASE ASC",
+            Self::CompletitudAsc => {
+                "COALESCE(CAST(cantidad_poseida AS REAL) / NULLIF(v.cantidad_numeros, 0), 0) ASC, v.nombre COLLATE NOCASE ASC"
+            }
+            Self::CompletitudDesc => {
+                "COALESCE(CAST(cantidad_poseida AS REAL) / NULLIF(v.cantidad_numeros, 0), 0) DESC, v.nombre COLLATE NOCASE ASC"
+            }
         }
     }
 }

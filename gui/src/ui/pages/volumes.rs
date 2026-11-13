@@ -1,8 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{LazyLock, mpsc};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 use adw::prelude::*;
 use gtk4::prelude::*;
@@ -24,6 +25,8 @@ type VolumeIdRegistry = Rc<RefCell<Vec<i64>>>;
 /// Widgets pendientes de recibir su thumbnail (usamos el id_comicbook_portada).
 type ThumbWidgets = Rc<RefCell<HashMap<i64, glib::WeakRef<gtk::Box>>>>;
 type ThumbResult = (i64, Vec<u8>);
+
+static PAGE_LOAD_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(1));
 
 pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
     let toolbar = adw::ToolbarView::new();
@@ -155,10 +158,14 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
         .hexpand(true)
         .build();
 
-    let wrap_box = adw::WrapBox::builder()
+    let wrap_box = gtk::FlowBox::builder()
         .valign(gtk::Align::Start)
-        .child_spacing(8)
-        .line_spacing(8)
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .column_spacing(12)
+        .row_spacing(12)
+        .min_children_per_line(1)
+        .max_children_per_line(32)
         .margin_top(8)
         .margin_bottom(8)
         .margin_start(8)
@@ -522,7 +529,13 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
             if load_s.get() || done_s.get() {
                 return;
             }
-            if adj.value() + adj.page_size() >= adj.upper() - 800.0 {
+            let v = adj.value();
+            let page_size = adj.page_size();
+            let upper = adj.upper();
+
+            // Solo disparar carga si el contenido actual supera el viewport
+            // y estamos a menos de 800px del final.
+            if upper > page_size && v + page_size >= upper - 800.0 {
                 let current_gen = gen_s.get();
                 cargar_pagina(
                     &wb_s,
@@ -620,7 +633,7 @@ pub fn build(pool: SqlitePool, tab_view: adw::TabView) -> gtk::Widget {
 }
 
 fn cargar_pagina(
-    flow: &adw::WrapBox,
+    flow: &gtk::FlowBox,
     stack: &gtk::Stack,
     pool: &SqlitePool,
     offset: &Rc<Cell<i64>>,
@@ -667,6 +680,7 @@ fn cargar_pagina(
     run_in_background(
         tokio::runtime::Handle::current(),
         async move {
+            let _permit = PAGE_LOAD_SEM.acquire().await.ok();
             let setup = SetupRepository::new(&pool_task)
                 .get()
                 .await
@@ -688,13 +702,14 @@ fn cargar_pagina(
             (volumes, limit, card_size)
         },
         move |(volumes, limit, card_size)| {
-            load_done.set(false);
             if gen_check.get() != current_gen {
+                load_done.set(false);
                 return;
             }
 
             let received = volumes.len() as i64;
             if is_first && received == 0 {
+                load_done.set(false);
                 stack_done.set_visible_child_name("empty");
                 all_done.set(true);
                 return;
@@ -711,8 +726,9 @@ fn cargar_pagina(
             let idx = Rc::new(RefCell::new(0usize));
             const BATCH: usize = 25;
 
-            glib::idle_add_local(move || {
+            glib::timeout_add_local(Duration::from_millis(12), move || {
                 if gen_check.get() != current_gen {
+                    load_done.set(false);
                     return glib::ControlFlow::Break;
                 }
 
@@ -733,27 +749,27 @@ fn cargar_pagina(
                     flow_done.append(&card);
                     registry_done.borrow_mut().push(vol.id_volume);
 
-                    if let (Some(id_portada), Some(path)) =
+                    // Usar el ID del volumen como clave para los thumbnails, no el ID de portada,
+                    // para evitar colisiones si varios volúmenes comparten la misma portada.
+                    let thumb_id = vol.id_volume;
+                    if let (Some(_id_portada), Some(path)) =
                         (vol.id_comicbook_portada, &vol.path_portada)
                     {
-                        tw_done.borrow_mut().insert(id_portada, img_weak);
-                        schedule_thumbnail(id_portada, path.clone(), tx_done.clone(), card_size);
+                        tw_done.borrow_mut().insert(thumb_id, img_weak);
+                        schedule_thumbnail(thumb_id, path.clone(), tx_done.clone(), card_size);
                     } else {
                         let vt_path =
                             babelcomics_core::helpers::paths::volume_thumbnail_path(vol.id_volume);
                         if vt_path.exists() {
-                            let id_neg = -vol.id_volume;
-                            tw_done.borrow_mut().insert(id_neg, img_weak);
+                            tw_done.borrow_mut().insert(thumb_id, img_weak);
                             let tx = tx_done.clone();
                             tokio::runtime::Handle::current().spawn(async move {
                                 if let Ok(bytes) = tokio::fs::read(vt_path).await {
-                                    let _ = tx.send((id_neg, bytes));
+                                    let _ = tx.send((thumb_id, bytes));
                                 }
                             });
                         } else if !vol.image_url.is_empty() {
-                            // Fallback final: cargar desde URL si no tenemos nada local
-                            let id_neg = -vol.id_volume;
-                            tw_done.borrow_mut().insert(id_neg, img_weak);
+                            tw_done.borrow_mut().insert(thumb_id, img_weak);
                             let tx = tx_done.clone();
                             let url = vol.image_url.clone();
                             tokio::runtime::Handle::current().spawn(async move {
@@ -767,7 +783,7 @@ fn cargar_pagina(
                                         let _ = std::fs::create_dir_all(parent);
                                     }
                                     let _ = std::fs::write(&vt_path, &bytes);
-                                    let _ = tx.send((id_neg, bytes));
+                                    let _ = tx.send((thumb_id, bytes));
                                 }
                             });
                         }
@@ -776,6 +792,7 @@ fn cargar_pagina(
 
                 *idx.borrow_mut() = end;
                 if end >= volumes.len() {
+                    load_done.set(false);
                     glib::ControlFlow::Break
                 } else {
                     glib::ControlFlow::Continue
@@ -787,7 +804,7 @@ fn cargar_pagina(
 
 fn adjuntar_gesto_seleccion(
     card: &gtk::Widget,
-    wb: &adw::WrapBox,
+    wb: &gtk::FlowBox,
     last_clicked: &Rc<Cell<i32>>,
     volume_id: i64,
     pool: SqlitePool,
@@ -851,10 +868,12 @@ fn adjuntar_gesto_seleccion(
             let mut child = wb.first_child();
             let mut i = 0i32;
             while let Some(c) = child {
-                if i >= start && i <= end {
-                    c.add_css_class("selected");
-                } else if !ctrl {
-                    c.remove_css_class("selected");
+                if let Some(card) = flow_box_card(&c) {
+                    if i >= start && i <= end {
+                        card.add_css_class("selected");
+                    } else if !ctrl {
+                        card.remove_css_class("selected");
+                    }
                 }
                 child = c.next_sibling();
                 i += 1;
@@ -876,34 +895,31 @@ fn adjuntar_gesto_seleccion(
     card.add_controller(gesture);
 }
 
-fn deseleccionar_todo(wb: &adw::WrapBox) {
+fn deseleccionar_todo(wb: &gtk::FlowBox) {
     let mut child = wb.first_child();
     while let Some(c) = child {
-        c.remove_css_class("selected");
-        child = c.next_sibling();
-    }
-}
-
-fn wb_child_index(wb: &adw::WrapBox, target: &gtk::Widget) -> usize {
-    let mut child = wb.first_child();
-    let mut i = 0usize;
-    while let Some(c) = child {
-        if &c == target {
-            return i;
+        if let Some(card) = flow_box_card(&c) {
+            card.remove_css_class("selected");
         }
         child = c.next_sibling();
-        i += 1;
     }
-    0
 }
 
-fn get_selected_ids(wb: &adw::WrapBox, registry: &VolumeIdRegistry) -> Vec<i64> {
+fn wb_child_index(_wb: &gtk::FlowBox, target: &gtk::Widget) -> usize {
+    target
+        .parent()
+        .and_then(|p| p.downcast::<gtk::FlowBoxChild>().ok())
+        .map(|child| child.index().max(0) as usize)
+        .unwrap_or(0)
+}
+
+fn get_selected_ids(wb: &gtk::FlowBox, registry: &VolumeIdRegistry) -> Vec<i64> {
     let ids = registry.borrow();
     let mut selected = Vec::new();
     let mut child = wb.first_child();
     let mut i = 0usize;
     while let Some(c) = child {
-        if c.has_css_class("selected") {
+        if flow_box_card(&c).is_some_and(|card| card.has_css_class("selected")) {
             if let Some(&id) = ids.get(i) {
                 selected.push(id);
             }
@@ -912,6 +928,14 @@ fn get_selected_ids(wb: &adw::WrapBox, registry: &VolumeIdRegistry) -> Vec<i64> 
         i += 1;
     }
     selected
+}
+
+fn flow_box_card(child: &gtk::Widget) -> Option<gtk::Widget> {
+    child
+        .clone()
+        .downcast::<gtk::FlowBoxChild>()
+        .ok()
+        .and_then(|wrapper| wrapper.child())
 }
 
 fn build_popover_button(title: &str, subtitle: &str, icon: &str) -> gtk::Button {
@@ -956,15 +980,21 @@ fn build_volume_card(
 
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
+        .width_request(cw as i32)
         .margin_top(4)
         .margin_bottom(4)
         .margin_start(4)
         .margin_end(4)
-        .css_classes(["card"])
+        .halign(gtk::Align::Center)
+        .hexpand(false)
+        .css_classes(["comic-card"])
         .build();
 
     let image_container = gtk::Box::builder()
+        .width_request(cw as i32)
         .height_request(ch as i32)
+        .halign(gtk::Align::Center)
+        .hexpand(false)
         .overflow(gtk::Overflow::Hidden)
         .css_classes(["comic-cover-container"])
         .build();
@@ -1032,10 +1062,10 @@ fn build_volume_card(
 fn start_thumbnail_consumer(
     widgets: ThumbWidgets,
     rx: mpsc::Receiver<ThumbResult>,
-    weak_box: glib::WeakRef<adw::WrapBox>,
+    weak_box: glib::WeakRef<gtk::FlowBox>,
 ) {
     let rx = Rc::new(RefCell::new(rx));
-    glib::timeout_add_local(Duration::from_millis(16), move || {
+    glib::timeout_add_local(Duration::from_millis(100), move || {
         if weak_box.upgrade().is_none() {
             return glib::ControlFlow::Break;
         }
@@ -1065,8 +1095,11 @@ fn start_thumbnail_consumer(
     });
 }
 
+static THUMB_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
+
 fn schedule_thumbnail(id: i64, path: String, tx: mpsc::Sender<ThumbResult>, size: CardSize) {
     tokio::runtime::Handle::current().spawn(async move {
+        let _permit = THUMB_SEM.acquire().await.unwrap();
         let thumb_path = comic_thumbnail_path(id, size);
         if !thumb_path.exists() {
             let path_clone = path.clone();

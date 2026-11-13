@@ -241,7 +241,7 @@ impl<'a> ComicbookInfoRepository<'a> {
     // --- Covers ---
 
     pub async fn get_covers(&self, info_id: i64) -> Result<Vec<ComicbookInfoCover>> {
-        let rows = sqlx::query_as!(
+        let mut rows = sqlx::query_as!(
             ComicbookInfoCover,
             r#"SELECT
                 id as "id!: i64",
@@ -253,7 +253,34 @@ impl<'a> ComicbookInfoRepository<'a> {
         )
         .fetch_all(self.pool)
         .await?;
+        rows.sort_by_key(|cover| cover.id);
         Ok(rows)
+    }
+
+    pub async fn get_covers_by_volume(&self, volume_id: i64) -> Result<Vec<ComicbookInfoCover>> {
+        use sqlx::Row;
+
+        let rows = sqlx::query(
+            r#"SELECT cic.id, cic.id_comicbook_info, cic.url_original, cic.ruta_local
+               FROM comicbooks_info_covers cic
+               JOIN comicbooks_info ci
+                 ON ci.id_comicbook_info = cic.id_comicbook_info
+               WHERE ci.id_volume = ?
+               ORDER BY cic.id"#,
+        )
+        .bind(volume_id)
+        .fetch_all(self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ComicbookInfoCover {
+                id: row.get(0),
+                id_comicbook_info: row.get(1),
+                url_original: row.get(2),
+                ruta_local: row.get(3),
+            })
+            .collect())
     }
 
     pub async fn insert_cover(&self, cover: &NewComicbookInfoCover) -> Result<i64> {
@@ -356,11 +383,12 @@ impl<'a> ComicbookInfoRepository<'a> {
             .collect())
     }
 
-    /// (id_comicbook_info, clip_embedding) de todas las portadas indexadas.
-    pub async fn get_all_cover_clip_embeddings(&self) -> Result<Vec<(i64, Vec<u8>)>> {
+    /// (id_comicbook_info, id de la portada, clip_embedding) de todas las
+    /// portadas indexadas, incluidas las alternativas.
+    pub async fn get_all_cover_clip_embeddings(&self) -> Result<Vec<(i64, i64, Vec<u8>)>> {
         use sqlx::Row;
         let rows = sqlx::query(
-            r#"SELECT id_comicbook_info, clip_embedding
+            r#"SELECT id_comicbook_info, id, clip_embedding
                FROM comicbooks_info_covers
                WHERE clip_embedding IS NOT NULL
                ORDER BY id_comicbook_info, id"#,
@@ -370,8 +398,8 @@ impl<'a> ComicbookInfoRepository<'a> {
         Ok(rows
             .into_iter()
             .filter_map(|r| {
-                let blob: Option<Vec<u8>> = r.get(1);
-                blob.map(|b| (r.get(0), b))
+                let blob: Option<Vec<u8>> = r.get(2);
+                blob.map(|b| (r.get(0), r.get(1), b))
             })
             .collect())
     }
